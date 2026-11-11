@@ -16,6 +16,7 @@ Da un file video invece che dalla webcam (serve ffmpeg):
     python v16_video_mode.py --video clip.mp4                 salva captures/clip_larva.mp4
     python v16_video_mode.py --video clip.mp4 --uscita x.mp4  sceglie il file di uscita
     python v16_video_mode.py --video clip.mp4 --nero          sfondo nero invece del video
+    python v16_video_mode.py --video clip.mp4 --corna 0 --ali 0   senza corna ne' ali (solo qui)
     Usa le impostazioni salvate (preset, corna, ali...); l'audio del video viene copiato
     nell'uscita e fa reagire la maschera alla voce come il microfono.
 
@@ -1644,7 +1645,9 @@ def leggi_audio(ffmpeg, percorso, frequenza=16000):
     return campioni if uscita.returncode == 0 and len(campioni) else None
 
 
-def rendi_video(ingresso, uscita=None, sfondo_nero=False):
+def rendi_video(ingresso, uscita=None, sfondo_nero=False, cambia=None):
+    """'cambia': valori che sostituiscono quelli salvati solo per questo video,
+    per esempio {"corna": 0.0, "ali": 0.0}."""
     """Applica la maschera a un file video, senza finestra, e salva un MP4 (H.264 + audio)."""
     import shutil
     import subprocess
@@ -1672,6 +1675,8 @@ def rendi_video(ingresso, uscita=None, sfondo_nero=False):
           f"{totale} fotogrammi, audio {'si' if audio is not None else 'no'}")
     olo = Ologramma(ctx, w, h)
     carica_impostazioni(olo)
+    for nome, valore in (cambia or {}).items():
+        setattr(olo, nome, valore)
     olo.sfondo = not sfondo_nero
     olo.adatta = sfondo_nero            # sul video la maschera resta sul volto vero
     tracciatore = Tracciatore(None)
@@ -1943,8 +1948,11 @@ if __name__ == "__main__":
     if "--video" in sys.argv:
         argomenti = sys.argv[1:]
         if not _opzione(argomenti, "--video"):
-            raise SystemExit("Uso: python v16_video_mode.py --video clip.mp4 [--uscita x.mp4] [--nero]")
+            raise SystemExit("Uso: python v16_video_mode.py --video clip.mp4 [--uscita x.mp4] [--nero]"
+                             " [--corna N] [--ali N]")
+        cambia = {nome: float(_opzione(argomenti, f"--{nome}"))
+                  for nome in ("corna", "ali") if _opzione(argomenti, f"--{nome}") is not None}
         rendi_video(_opzione(argomenti, "--video"), _opzione(argomenti, "--uscita"),
-                    "--nero" in argomenti)
+                    "--nero" in argomenti, cambia)
     else:
         main()
