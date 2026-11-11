@@ -41,10 +41,12 @@ python -m venv .venv
 # macOS / Linux
 source .venv/bin/activate
 
-pip install mediapipe opencv-python numpy moderngl glfw
-pip install sounddevice    # optional: voice reaction
-pip install pyvirtualcam   # optional: virtual webcam output
+pip install -r requirements.txt
 ```
+
+`sounddevice` (voice reaction) and `pyvirtualcam` (virtual webcam) are optional. Each script also lists its own dependencies at the top.
+
+Prefer not to clone the whole repo? Each version can also be downloaded on its own as a zip from the [Releases](https://github.com/k0m1d3v/maschera/releases) page.
 
 The MediaPipe models (`face_landmarker.task`, `pose_landmarker_lite.task`, `selfie_multiclass_256x256.tflite`) are downloaded automatically the first time you run a script.
 
