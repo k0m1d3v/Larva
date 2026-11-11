@@ -11,11 +11,11 @@ A Python webcam filter that tracks your face with [MediaPipe](https://ai.google.
 
 ## Features
 
-- **Face tracking**: 478-point face mesh from MediaPipe Face Landmarker, plus Pose Landmarker for the body in later versions
+- **Face tracking**: 478-point face mesh from MediaPipe Face Landmarker, plus Pose Landmarker to attach the wings to your shoulders
 - **GPU rendering** (v5+): a 3D face mesh with per-pixel contour lines. Particles, trails, bloom and glitch are all shaders (moderngl + glfw).
 - **Styles**: hologram, dots only, lines only
 - **Line patterns**: depth contours, rings around the eyes and mouth, or scanlines
-- **Add-ons**: irises, teeth, facial features, horns, ASCII demon wings, a body outline from the neck down
+- **Add-ons**: irises, teeth, facial features, horns, ASCII demon wings
 - **Color presets**: cyan, alarm red, gold, black & white, plus hue/saturation controls and the system color picker
 - **Reactions**:
   - your voice sends a wave of light out from the mouth with each syllable
@@ -53,8 +53,8 @@ The MediaPipe models (`face_landmarker.task`, `pose_landmarker_lite.task`, `self
 ## Usage
 
 ```bash
-python v11_body_outline.py              # normal window
-python v11_body_outline.py --virtuale   # also send the output to a virtual webcam
+python v14_fast_geometry.py              # normal window
+python v14_fast_geometry.py --virtuale   # also send the output to a virtual webcam
 ```
 
 The virtual webcam needs OBS installed on Windows and macOS, or the `v4l2loopback` module on Linux.
@@ -71,7 +71,6 @@ The virtual webcam needs OBS installed on Windows and macOS, or the `v4l2loopbac
 | `o` / `d` / `t` | Irises / teeth / features (eyebrows, eyes, lips) |
 | `k` | Horns |
 | `a` | ASCII demon wings |
-| `y` | Body outline from the neck down |
 | `g` | Glitch |
 | `b` | Black background ↔ dimmed webcam |
 | `p` | System color picker |
@@ -101,6 +100,10 @@ Each file is a standalone snapshot of the project at one stage. Most recent last
 | `v09_ascii_wings.py` | ASCII demon wings |
 | `v10_wings_refined.py` | Refinements to the wings and overall look |
 | `v11_body_outline.py` | Body outline from the neck down (Pose Landmarker): a glowing profile with a few contour lines |
+| `v12_no_body_outline.py` | Removes the body outline. Pose tracking is kept only for the wings. Fixes the dark square under the chin. |
+| `v13_optimized.py` | Faster tracking: MediaPipe runs on a 640 px copy, the camera is read on its own thread (MJPG), the body is tracked every other frame. Faster mesh math, and the virtual webcam is capped at 30 fps. Asks the webcam for 60 fps. |
+| `v14_fast_geometry.py` | Rewritten mesh geometry code, about 25% less CPU per frame with an identical image. **Recommended.** |
+| `v15_lite.py` | v14 for weaker PCs (integrated graphics, older laptops): no 2× supersampling and 4 bloom levels instead of 6. Slightly harder edges and a narrower glow. |
 
 ## How it works
 
