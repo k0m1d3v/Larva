@@ -7,8 +7,8 @@ Installazione:
     pip install pyvirtualcam        (facoltativo: webcam virtuale)
 
 Avvio:
-    python maschera.py              finestra normale
-    python maschera.py --virtuale   in piu' manda l'immagine a una webcam virtuale
+    python v06_slider_panel.py              finestra normale
+    python v06_slider_panel.py --virtuale   in piu' manda l'immagine a una webcam virtuale
                                     (Windows/macOS: serve OBS installato;
                                      Linux: serve il modulo v4l2loopback)
 
@@ -17,6 +17,7 @@ Tasti:
     1-4  preset: ciano, rosso allarme, oro, bianco e nero
     l    motivo delle linee: curve di livello / anelli attorno a occhi e bocca / scansione
     m    stile: ologramma / solo puntini / solo linee
+    h    testa completa <-> solo ovale del volto
     z    volto centrato, ingrandito e in prospettiva <-> posizione reale
     o    iridi            d  denti            t  tratti (sopracciglia, occhi, labbra)
     g    glitch           b  sfondo nero <-> webcam scurita
@@ -58,7 +59,7 @@ CAMERA = 0            # indice della webcam
 ALTEZZA = 0           # risoluzione verticale del rendering; 0 = quella del monitor (max 1080)
 SOVRACAMPIONA = 2     # la scena e' disegnata a risoluzione x2 e poi ridotta (1 = spento)
 N_ALONI = 6           # scale del bagliore: piu' sono, piu' l'alone e' largo e morbido
-GRANDEZZA = 0.64      # con 'z' attivo: altezza del volto rispetto alla finestra
+GRANDEZZA = 0.60      # con 'z' attivo: altezza del volto rispetto alla finestra
 PROSPETTIVA = 0.9     # valore iniziale. 0 = proiezione piatta; piu' alto = piu' profondita'
 OSCILLAZIONE = 0.10   # ampiezza (radianti) del dondolio della camera virtuale
 SCIA = 0.80           # persistenza della scia (0 = nessuna, 0.95 = lunghissima)
@@ -102,12 +103,48 @@ def _suddividi(tri):
     for a, b, c in tri:
         ab, bc, ca = meta(a, b), meta(b, c), meta(c, a)
         nuovi += [(a, ab, ca), (ab, b, bc), (ca, bc, c), (ab, bc, ca)]
-    return spigoli.astype(np.int32), np.array(nuovi, np.int32)
+    return spigoli.astype(np.int32), np.array(nuovi, np.int32), indice
+
+
+def _anello_ovale(indice):
+    """Il contorno del volto come anello ordinato (con i punti medi, per non lasciare fessure)."""
+    dopo = {c.start: c.end for c in _FLC.FACE_LANDMARKS_FACE_OVAL}
+    primo = next(iter(dopo))
+    giro, p = [primo], dopo[primo]
+    while p != primo and len(giro) < 100:
+        giro.append(p)
+        p = dopo[p]
+    anello = []
+    for a, b in zip(giro, giro[1:] + giro[:1]):
+        anello.append(a)
+        medio = indice.get((min(a, b), max(a, b)))
+        if medio is not None:
+            anello.append(medio)
+    return np.array(anello, np.int32)
 
 
 TRIANGOLI = _triangoli()
-SPIGOLI, TRI_FINI = _suddividi(TRIANGOLI)
+SPIGOLI, TRI_FINI, _INDICE = _suddividi(TRIANGOLI)
 N_VERTICI = 478 + len(SPIGOLI)
+
+# testa completa: anelli aggiuntivi oltre l'ovale. (raggio, arretramento, peso della normale)
+ANELLO = _anello_ovale(_INDICE)
+PROFILO = [(0.035, 0.07, 0.45), (0.075, 0.20, 0.70), (0.095, 0.38, 0.90), (0.100, 0.60, 1.00)]
+N_TOTALE = N_VERTICI + len(PROFILO) * len(ANELLO)
+
+
+def _triangoli_testa():
+    R, tri = len(ANELLO), []
+    for k in range(len(PROFILO)):
+        dentro = ANELLO if k == 0 else N_VERTICI + (k - 1) * R + np.arange(R)
+        fuori = N_VERTICI + k * R + np.arange(R)
+        for i in range(R):
+            j = (i + 1) % R
+            tri += [(dentro[i], fuori[i], dentro[j]), (dentro[j], fuori[i], fuori[j])]
+    return np.array(tri, np.int32)
+
+
+TRI_TESTA = _triangoli_testa()
 
 # tratti evidenziati: segmenti di labbra, occhi e sopracciglia
 SEGMENTI = np.array(
@@ -128,9 +165,9 @@ CURSORI = [
     ("Grandezza", "grandezza", 0.30, 0.90),
     ("Tinta", "tinta", 0.0, 1.0),
     ("Saturazione", "saturazione", 0.0, 1.0),
-    ("Luce webcam", "luce_sfondo", 0.0, 1.0),
 ]
-DA_SALVARE = [c[1] for c in CURSORI] + ["stile", "motivo", "iridi", "denti", "tratti", "glitch"]
+DA_SALVARE = [c[1] for c in CURSORI] + ["stile", "motivo", "iridi", "denti", "tratti", "testa",
+                                         "glitch"]
 rng = np.random.default_rng()
 
 
@@ -423,7 +460,7 @@ void main() {
 FS_FINALE = """
 #version 330
 uniform sampler2D scena, a0, a1, a2, a3, a4, a5, webcam;
-uniform float t, seme, glitch, energia, sfondo, bagliore, lampo, colpo, rapporto, luce_sfondo;
+uniform float t, seme, glitch, energia, sfondo, bagliore, lampo, colpo;
 uniform vec2 dimensione;
 in vec2 uv;
 out vec4 f;
@@ -444,7 +481,7 @@ void main() {
         p.x += (caso(vec2(seme, banda)) - 0.5) * (0.14 + 0.2 * colpo);
 
     // aberrazione cromatica, piu' forte verso i bordi e quando apri la bocca
-    float ab = (0.0010 + 0.0015 * energia + 0.008 * colpo) * rapporto * (0.5 + length(uv - 0.5) * 2.0);
+    float ab = (0.0012 + 0.006 * energia + 0.012 * colpo) * (0.5 + length(uv - 0.5) * 2.0);
     vec3 c = vec3(luce(p + vec2(ab, 0.0)).r, luce(p).g, luce(p - vec2(ab, 0.0)).b);
 
     c *= 1.0 + 0.8 * lampo;                                    // sorpresa: lampo...
@@ -456,7 +493,7 @@ void main() {
     c += (caso(uv * dimensione + t) - 0.5) * 0.035;            // grana
     c *= 0.94 + 0.06 * caso(vec2(t, 3.0));                     // sfarfallio
 
-    vec3 fondo = texture(webcam, vec2(uv.x, 1.0 - uv.y)).bgr * luce_sfondo * sfondo;
+    vec3 fondo = texture(webcam, vec2(uv.x, 1.0 - uv.y)).bgr * 0.22 * sfondo;
     f = vec4(fondo + c, 1.0);
 }
 """
@@ -496,12 +533,10 @@ class Ologramma:
         # ---- opzioni (cambiate dai tasti)
         self.stile, self.motivo = "ologramma", "livello"
         self.glitch, self.sfondo = True, False
-        self.iridi = self.denti = self.tratti = True
+        self.iridi = self.denti = self.tratti = self.testa = True
         self.adatta = True                # volto centrato, ingrandito e in prospettiva
         self.grandezza, self.prospettiva = GRANDEZZA, PROSPETTIVA
         self.oscillazione, self.scia = OSCILLAZIONE, SCIA
-        self.luce_sfondo = 0.30           # luminosita' della webcam quando fa da sfondo
-        self.rapporto = 1.0               # grandezza del volto a schermo rispetto a quella "piena"
         self.preset(1)
 
         # ---- stato
@@ -539,13 +574,13 @@ class Ologramma:
         self.p_finale = P(VS_SCHERMO, FS_FINALE)
 
         # ---- geometria
-        self.b_mesh = ctx.buffer(reserve=N_VERTICI * 8 * 4, dynamic=True)
-        self.b_punti = ctx.buffer(reserve=N_VERTICI * 5 * 4, dynamic=True)
+        self.b_mesh = ctx.buffer(reserve=N_TOTALE * 8 * 4, dynamic=True)
+        self.b_punti = ctx.buffer(reserve=N_TOTALE * 5 * 4, dynamic=True)
         self.b_tratti = ctx.buffer(reserve=len(SEGMENTI) * 6 * 4 * 4, dynamic=True)
         self.b_denti = ctx.buffer(reserve=4 * COLONNE_DENTI * 7 * 4, dynamic=True)
         self.b_gola = ctx.buffer(reserve=6 * 7 * 4, dynamic=True)
         self.b_iridi = ctx.buffer(reserve=2 * 5 * 4, dynamic=True)
-        indici = ctx.buffer(TRI_FINI.astype("i4").tobytes())
+        indici = ctx.buffer(np.vstack([TRI_FINI, TRI_TESTA]).astype("i4").tobytes())
         A = lambda prog, buf, formato, *nomi, indici=None: vertici(
             ctx, prog, buf, formato, *nomi, indici=indici)
         self.v_mesh = A(self.p_mesh, self.b_mesh, "3f 1f 1f 3f",
@@ -736,6 +771,18 @@ class Ologramma:
         n_medio /= np.linalg.norm(n_medio, axis=1, keepdims=True) + 1e-9
         P, nv = np.vstack([P, medio]), np.vstack([nv, n_medio])
 
+        # testa completa: anelli che proseguono oltre l'ovale e girano verso la nuca
+        base = P[ANELLO]
+        raggio = base - base.mean(axis=0)
+        raggio -= (raggio @ avanti)[:, None] * avanti
+        raggio /= np.linalg.norm(raggio, axis=1, keepdims=True) + 1e-9
+        in_alto = -(raggio @ giu)                                   # 1 in cima, -1 al mento
+        ampiezza = (1.0 + 1.1 * np.clip(in_alto, 0, 1) - 0.4 * np.clip(-in_alto, 0, 1))[:, None]
+        for r, arretra, peso in PROFILO:
+            P = np.vstack([P, base + raggio * (r * L) * ampiezza + dietro * (arretra * L)])
+            n = raggio * peso + avanti * (1.0 - peso)
+            nv = np.vstack([nv, n / (np.linalg.norm(n, axis=1, keepdims=True) + 1e-9)])
+
         # campo su cui corrono le linee
         if self.motivo == "anelli":            # anelli attorno a occhi, bocca e centro della fronte
             centri = np.stack([P0[468], P0[473], bocca, P0[151]])
@@ -834,9 +881,6 @@ class Ologramma:
                                                                 (moderngl.ONE, moderngl.ONE)))
         if self.pos is not None and self.presenza > 0.001:
             n_punti, L, campo_max, pieno = self._prepara(t)
-            # spessori, bagliore e sfasamento dei colori sono proporzionati al volto:
-            # quando e' piccolo nell'inquadratura non devono impastarlo
-            self.rapporto = float(np.clip(L / 0.45, 0.4, 1.3))
             # materializzazione: il fronte avanza lungo il campo, dal naso verso l'esterno
             p = self.presenza
             rivela = 1e9 if p >= 1.0 else (p * p * (3 - 2 * p)) * (campo_max * 1.08 + 0.05)
@@ -845,13 +889,14 @@ class Ologramma:
             ctx.disable(moderngl.BLEND)
             # la mesh si disegna sempre (nasconde cio' che sta dietro); le linee solo se servono
             imposta(self.p_mesh, colore=colore, n_linee=float(self.n_linee), fase=self.fase,
-                    spessore=self.spessore * self.ss * self.rapporto, energia=self.energia, tempo=tempo,
+                    spessore=self.spessore * self.ss, energia=self.energia, tempo=tempo,
                     y_fascio=1.3 - (t * 0.45 % 1.0) * 2.6, rivela=float(rivela),
                     in_formazione=0.0 if p >= 1.0 else 1.0, voce=self.voce,
                     tremolio=self.rabbia, mostra_linee=0.0 if self.stile == "puntini" else 1.0)
             if "impulsi" in self.p_mesh:
                 self.p_mesh["impulsi"].write(self.impulsi.astype("f4").tobytes())
-            self.v_mesh.render(moderngl.TRIANGLES)
+            n_tri = len(TRI_FINI) + (len(TRI_TESTA) if self.testa else 0)
+            self.v_mesh.render(moderngl.TRIANGLES, vertices=n_tri * 3)
 
             if pieno > 0:                  # compaiono solo nel buco della bocca
                 imposta(self.p_gola, colore=colore, forza=pieno, tempo=tempo)
@@ -871,7 +916,8 @@ class Ologramma:
             if self.stile != "linee":
                 imposta(self.p_punti, colore=colore, rivela=float(rivela),
                         scala=L * w * self.ss / self.aspetto / 75.0 * (1.0 + 0.5 * self.energia))
-                self.v_punti.render(moderngl.POINTS, vertices=n_punti)
+                self.v_punti.render(moderngl.POINTS,
+                                    vertices=n_punti if self.testa else N_VERTICI)
             ctx.depth_mask = True
 
         ctx.disable(moderngl.DEPTH_TEST)
@@ -906,8 +952,7 @@ class Ologramma:
             glitch=((0.02 + 0.25 * self.energia + 0.2 * self.rabbia) * rng.random()
                     if self.glitch else 0.0),
             energia=self.energia, lampo=self.lampo, colpo=self.colpo,
-            bagliore=self.bagliore * self.rapporto * (1.0 + 0.3 * self.energia + 0.2 * self.voce),
-            rapporto=self.rapporto, luce_sfondo=self.luce_sfondo,
+            bagliore=self.bagliore * (1.0 + 0.3 * self.energia + 0.2 * self.voce),
             sfondo=1.0 if (self.sfondo and self.t_webcam is not None) else 0.0,
             dimensione=(float(w), float(h)))
 
@@ -1184,7 +1229,7 @@ def main():
 
     stato = dict(selettore=False, adatta=True, screenshot=False, video=None, intero=None)
     alterna = {glfw.KEY_O: "iridi", glfw.KEY_D: "denti", glfw.KEY_T: "tratti",
-               glfw.KEY_G: "glitch", glfw.KEY_B: "sfondo"}
+               glfw.KEY_H: "testa", glfw.KEY_G: "glitch", glfw.KEY_B: "sfondo"}
     prossimo = lambda elenco, attuale: elenco[(elenco.index(attuale) + 1) % len(elenco)]
 
     def tasto(_finestra, codice, _scan, azione, _mod):

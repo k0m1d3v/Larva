@@ -51,8 +51,8 @@ The MediaPipe models (`face_landmarker.task`, `pose_landmarker_lite.task`, `self
 ## Usage
 
 ```bash
-python "AddT-shirt.py"              # normal window
-python "AddT-shirt.py" --virtuale   # also send the output to a virtual webcam
+python v11_body_outline.py              # normal window
+python v11_body_outline.py --virtuale   # also send the output to a virtual webcam
 ```
 
 The virtual webcam needs OBS installed on Windows and macOS, or the `v4l2loopback` module on Linux.
@@ -88,17 +88,17 @@ Each file is a standalone snapshot of the project at one stage. Most recent last
 
 | File | What it adds |
 |---|---|
-| `maschera.py` | First prototype: CPU, dots and contour lines (OpenCV) |
-| `Ologramma.py` | Glitch, expression reactions (open mouth, smile, eyebrows) |
-| `Ologramma V.2.py` | Hair/silhouette segmentation, virtual webcam |
-| `Ologramma V.3.py` | GPU rendering (moderngl + glfw), zoom, irises, teeth, color picker |
-| `Ologramma V.4.py` | Presets, line patterns, voice reaction, new expressions, screenshots & recording |
-| `Ologramma V.5.py` / `V.5 fix.py` | Slider panel, persistent settings |
-| `Ologramma V.6.py` | Horns |
-| `isThisNewArt.py` | ASCII demon wings |
-| `isThisArt.py` | v8 refinements |
-| `JumpInHistory.py` | Samurai armor (yoroi) from the neck down, using Pose Landmarker |
-| `AddT-shirt.py` | Body outline in place of the armor: a glowing profile with a few contour lines |
+| `v01_prototype.py` | First prototype: CPU, dots and contour lines (OpenCV) |
+| `v02_expressions.py` | Glitch, expression reactions (open mouth, smile, eyebrows) |
+| `v03_silhouette_virtualcam.py` | Hair/silhouette segmentation, virtual webcam |
+| `v04_gpu.py` | GPU rendering (moderngl + glfw), zoom, irises, teeth, color picker |
+| `v05_presets_voice.py` | Presets, line patterns, voice reaction, new expressions, screenshots & recording |
+| `v06_slider_panel.py` | Slider panel, persistent settings |
+| `v07_slider_panel_fix.py` | Fixes to the slider panel; drops the full-head toggle |
+| `v08_horns.py` | Horns |
+| `v09_ascii_wings.py` | ASCII demon wings |
+| `v10_wings_refined.py` | Refinements to the wings and overall look |
+| `v11_body_outline.py` | Body outline from the neck down (Pose Landmarker): a glowing profile with a few contour lines |
 
 ## How it works
 

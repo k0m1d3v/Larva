@@ -1,5 +1,5 @@
 """
-Maschera olografica in tempo reale dalla webcam (v7, rendering su GPU).
+Maschera olografica in tempo reale dalla webcam (v8, rendering su GPU).
 
 Installazione:
     pip install mediapipe opencv-python numpy moderngl glfw
@@ -7,8 +7,8 @@ Installazione:
     pip install pyvirtualcam        (facoltativo: webcam virtuale)
 
 Avvio:
-    python maschera.py              finestra normale
-    python maschera.py --virtuale   in piu' manda l'immagine a una webcam virtuale
+    python v11_body_outline.py              finestra normale
+    python v11_body_outline.py --virtuale   in piu' manda l'immagine a una webcam virtuale
                                     (Windows/macOS: serve OBS installato;
                                      Linux: serve il modulo v4l2loopback)
 
@@ -19,7 +19,8 @@ Tasti:
     m    stile: ologramma / solo puntini / solo linee
     z    volto centrato, ingrandito e in prospettiva <-> posizione reale
     o    iridi            d  denti            t  tratti (sopracciglia, occhi, labbra)
-    k    corna (la lunghezza si regola dal pannello)
+    k    corna            a  ali da demone in caratteri ASCII (misure dal pannello)
+    y    contorno del corpo dal collo in giu' (profilo luminoso e poche curve di livello)
     g    glitch           b  sfondo nero <-> webcam scurita
     p    selettore di colore di sistema
     frecce sinistra/destra  tinta          frecce su/giu'  saturazione
@@ -70,6 +71,13 @@ URL_MODELLO = (
 )
 FILE_IMPOSTAZIONI = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                  "maschera_impostazioni.json")
+CORPO_OGNI = 1            # il corpo viene tracciato ogni N fotogrammi (2 = piu' leggero, bordi in ritardo)
+SAGOMA_DIM = (384, 216)   # risoluzione della sagoma del corpo passata agli shader
+MODELLO_CORPO = "pose_landmarker_lite.task"
+URL_CORPO = (
+    "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
+    "pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
+)
 STILI = ["ologramma", "puntini", "linee"]
 MOTIVI = ["livello", "anelli", "scansione"]
 #          nome             tinta  satur.  linee  bagliore  spessore
@@ -162,6 +170,19 @@ def _triangoli_corna():
 
 
 TRI_CORNA = _triangoli_corna()
+ALI_RIGHE = 42                # righe di caratteri sull'altezza dello schermo (meno = piu' grandi)
+GLIFI = " .:;!/|*#%@"         # caratteri delle ali, dal piu' vuoto al piu' pieno
+
+
+def atlante_glifi(cella=(40, 64)):
+    """Una striscia con tutti i caratteri, uno per cella: lo shader delle ali pesca da qui."""
+    w, h = cella
+    img = np.zeros((h, w * len(GLIFI)), np.uint8)
+    for i, c in enumerate(GLIFI):
+        (lw, lh), _ = cv2.getTextSize(c, cv2.FONT_HERSHEY_DUPLEX, 1.5, 2)
+        cv2.putText(img, c, (i * w + (w - lw) // 2, (h + lh) // 2), cv2.FONT_HERSHEY_DUPLEX,
+                    1.5, 255, 2, cv2.LINE_AA)
+    return img
 COLONNE_DENTI = 33    # suddivisioni di ogni arcata di denti
 N_IMPULSI = 6         # onde della voce visibili contemporaneamente
 # cursori del pannello: (etichetta, attributo di Ologramma, minimo, massimo)
@@ -176,10 +197,13 @@ CURSORI = [
     ("Tinta", "tinta", 0.0, 1.0),
     ("Saturazione", "saturazione", 0.0, 1.0),
     ("Corna", "corna", 0.0, 1.6),
+    ("Ali", "ali", 0.0, 1.5),
     ("Bordo sfumato", "sfumatura", 0.0, 1.0),
     ("Luce webcam", "luce_sfondo", 0.0, 1.0),
+    ("Copertura", "copertura", 0.0, 1.0),
 ]
-DA_SALVARE = [c[1] for c in CURSORI] + ["stile", "motivo", "iridi", "denti", "tratti", "glitch"]
+DA_SALVARE = [c[1] for c in CURSORI] + ["stile", "motivo", "iridi", "denti", "tratti", "glitch",
+                                         "armatura"]
 rng = np.random.default_rng()
 
 
@@ -273,9 +297,11 @@ void main() {
     c += (colore * 0.4 + 0.6) * soglia * 1.6;
 
     // il volto svanisce verso il contorno invece di finire con un taglio netto
-    c *= mix(1.0, smoothstep(0.0, 1.5, v_bordo), sfumatura);
+    float pieno = mix(1.0, smoothstep(0.0, 1.5, v_bordo), sfumatura);
+    c *= pieno;
 
-    f = vec4(c * (1.0 + 0.25 * energia), 1.0);
+    // l'alfa dice quanto questo punto copre la webcam che sta sotto
+    f = vec4(c * (1.0 + 0.25 * energia), pieno);
 }
 """
 
@@ -301,7 +327,7 @@ out vec4 f;
 void main() {
     float d = length(gl_PointCoord - 0.5) * 2.0;
     float a = smoothstep(1.0, 0.0, d);
-    f = vec4((colore * 0.7 + 0.3) * a * a * v_lum * 0.9, 1.0);
+    f = vec4((colore * 0.7 + 0.3) * a * a * v_lum * 0.9, 0.0);
 }
 """
 
@@ -324,7 +350,7 @@ in float v_lato;
 out vec4 f;
 void main() {
     float a = pow(max(1.0 - v_lato * v_lato, 0.0), 1.5);
-    f = vec4((colore * 0.55 + 0.45) * a * forza, 1.0);
+    f = vec4((colore * 0.55 + 0.45) * a * forza, 0.0);
 }
 """
 
@@ -388,6 +414,136 @@ void main() {
 }
 """
 
+FS_ARMATURA = """
+#version 330
+uniform vec3 colore;
+uniform float tempo, forza, fase, spessore;
+uniform sampler2D sagoma;           // R: persona (1 = dentro); G: distanza dal bordo del corpo
+uniform float zoom, aspetto;
+uniform vec2 centro, scena;         // inquadratura attuale e misura della scena in pixel
+in vec2 v_uv;      // coordinate rispetto alle spalle, in larghezze di spalle (y verso il basso)
+in vec2 v_par;
+out vec4 f;
+
+void main() {
+    vec2 p = v_uv;
+    // dal pixel al punto corrispondente dell'immagine della webcam
+    vec2 s = gl_FragCoord.xy / scena;
+    vec2 cam = (vec2(s.x * aspetto, 1.0 - s.y) - vec2(aspetto * 0.5, 0.5)) / zoom + centro;
+    vec2 q = vec2(cam.x / aspetto, cam.y);
+    vec2 t = texture(sagoma, q).rg;
+    if (q.x < 0.0 || q.x > 1.0 || q.y < 0.0) t = vec2(0.0);
+    float dentro = smoothstep(0.42, 0.58, t.r);
+
+    // solo dalla base del collo in giu': sotto la linea delle spalle, sfumando verso il collo
+    float linea_spalle = -0.14 * (1.0 - min(abs(p.x) / 0.5, 1.0)) - 0.10;
+    float sotto = smoothstep(0.0, 0.10, p.y - linea_spalle)
+                * smoothstep(0.0, 0.06, length(p - vec2(0.0, -0.16)) - 0.21);
+    if (sotto < 0.01) discard;
+
+    // contorno del corpo
+    float bordo = 1.0 - smoothstep(1.0, 2.6, abs(t.r - 0.5) / max(fwidth(t.r), 1e-4));
+    // poche curve di livello verso l'interno, come quelle della maschera: seguono la sagoma
+    // e si spengono allontanandosi dal bordo
+    float l = t.g * 7.0 - fase * 0.35;
+    float d = abs(fract(l - 0.5) - 0.5) / max(fwidth(l), 1e-5);
+    float curve = (1.0 - smoothstep(spessore - 0.6, spessore + 0.6, d))
+                * exp(-t.g * 3.2) * (1.0 - smoothstep(0.80, 0.95, t.g)) * dentro;
+    if (dentro < 0.02 && bordo < 0.02) discard;
+
+    float luce = (bordo * 1.3 + curve * 0.8) * sotto;
+    // l'alfa dice quanto questo punto copre la webcam che sta sotto
+    f = vec4(colore * (luce + 0.012 * dentro * sotto) * forza, dentro * sotto * forza);
+}
+"""
+
+FS_ALI = """
+#version 330
+uniform sampler2D atlante;
+uniform vec3 colore;
+uniform vec2 cella;                 // misura di un carattere, in pixel
+uniform float tempo, forza, n_glifi;
+uniform sampler2D sagoma;           // dove sta la persona nell'immagine della webcam (1 = persona)
+uniform float usa_sagoma, zoom, aspetto;
+uniform vec2 centro, scena;         // inquadratura attuale e misura della scena in pixel
+in vec2 v_uv;                       // x: 0 all'attacco, 1 in punta; y: 0 in basso, 1 in alto
+in vec2 v_par;
+out vec4 f;
+
+float caso(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+
+float segmento(vec2 p, vec2 a, vec2 b) {
+    vec2 pa = p - a, ba = b - a;
+    return length(pa - ba * clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0));
+}
+
+// distanza con segno da un poligono (negativa dentro)
+float poligono(vec2 p, vec2 v[6]) {
+    float d = dot(p - v[0], p - v[0]);
+    float s = 1.0;
+    for (int i = 0, j = 5; i < 6; j = i, i++) {
+        vec2 e = v[j] - v[i], w = p - v[i];
+        vec2 b = w - e * clamp(dot(w, e) / dot(e, e), 0.0, 1.0);
+        d = min(d, dot(b, b));
+        bvec3 c = bvec3(p.y >= v[i].y, p.y < v[j].y, e.x * w.y > e.y * w.x);
+        if (all(c) || all(not(c))) s = -s;
+    }
+    return s * sqrt(d);
+}
+
+// incavo ad arco tra due punte: positivo dentro il cerchio da togliere
+float incavo(vec2 p, vec2 a, vec2 b, float fondo) {
+    vec2 m = (a + b) * 0.5, e = b - a;
+    vec2 n = normalize(vec2(e.y, -e.x));
+    float corda = length(e) * 0.5;
+    vec2 c = m - n * fondo;                                    // centro oltre il bordo dell'ala
+    return sqrt(corda * corda + fondo * fondo) - length(p - c);
+}
+
+// quanto e' "piena" l'ala in un punto: 0 fuori, fino a 1 sulle ossa
+float ala(vec2 uv) {
+    vec2 p = vec2(uv.x * 1.9, (uv.y - 0.41) * 2.2);
+    vec2 O = vec2(0.0, 0.0), W = vec2(0.50, 0.92), F0 = vec2(0.50, 1.28);
+    vec2 F1 = vec2(1.86, 1.18), F2 = vec2(1.78, 0.38), F3 = vec2(1.30, -0.28), B = vec2(0.14, -0.62);
+    vec2 v[6] = vec2[6](O, W, F1, F2, F3, B);
+    float d = poligono(p, v);
+    // bordo d'uscita a festoni, come un'ala di pipistrello
+    d = max(d, incavo(p, F1, F2, 0.55));
+    d = max(d, incavo(p, F2, F3, 0.50));
+    d = max(d, incavo(p, F3, B, 0.75));
+    float ossa = min(min(segmento(p, O, W), segmento(p, W, F1)),
+                     min(min(segmento(p, W, F2), segmento(p, W, F3)), segmento(p, W, F0)));
+    float osso = exp(-pow(ossa / 0.035, 2.0));
+    if (d > 0.0) return osso * 0.95;                           // fuori: resta solo l'artiglio
+    float orlo = exp(-pow(d / 0.05, 2.0));
+    float membrana = 0.34 + 0.16 * sin(length(p - W) * 9.0 - tempo * 2.5);
+    return clamp(max(osso, max(orlo * 0.75, membrana)), 0.0, 1.0);
+}
+
+void main() {
+    // griglia di caratteri: l'ala si valuta al centro di ogni cella, non pixel per pixel
+    vec2 cellaxy = floor(gl_FragCoord.xy / cella);
+    vec2 scarto = (cellaxy + 0.5) * cella - gl_FragCoord.xy;
+    vec2 uv = v_uv + dFdx(v_uv) * scarto.x + dFdy(v_uv) * scarto.y;
+    float pieno = ala(uv);
+    // con la webcam sullo sfondo le ali stanno dietro al corpo: dove c'e' la persona, il
+    // carattere sparisce (sullo sfondo nero il corpo non si vede, quindi restano intere).
+    // Dal centro della cella risalgo al punto corrispondente dell'immagine della webcam.
+    vec2 s = (cellaxy + 0.5) * cella / scena;
+    vec2 u = vec2(s.x * aspetto, 1.0 - s.y);
+    vec2 cam = (u - vec2(aspetto * 0.5, 0.5)) / zoom + centro;
+    float persona = texture(sagoma, vec2(cam.x / aspetto, cam.y)).r;
+    pieno *= 1.0 - usa_sagoma * smoothstep(0.45, 0.55, persona);
+    if (pieno <= 0.02) discard;
+    // i caratteri sfarfallano: ogni cella cambia un po' qualche volta al secondo
+    pieno = clamp(pieno * (0.75 + 0.5 * caso(cellaxy + floor(tempo * 7.0))), 0.0, 0.999);
+    float glifo = floor(pieno * n_glifi);
+    vec2 q = fract(gl_FragCoord.xy / cella);
+    float a = texture(atlante, vec2((glifo + q.x) / n_glifi, 1.0 - q.y)).r;
+    f = vec4((colore * 0.85 + 0.15) * a * (0.25 + 0.75 * pieno) * forza, 0.0);
+}
+"""
+
 VS_IRIDE = """
 #version 330
 in vec3 in_pos;
@@ -416,7 +572,7 @@ void main() {
     float raggi = pow(0.5 + 0.5 * cos(atan(q.y, q.x) * 16.0 + tempo * 0.8), 3.0)
                 * smoothstep(0.50, 0.62, d) * (1.0 - smoothstep(0.80, 0.92, d)) * 0.35;
     float luce = (anello + interno + pupilla + raggi) * (1.0 - smoothstep(1.2, 1.45, d));
-    f = vec4((colore * 0.8 + 0.2) * luce * v_aperto, 1.0);
+    f = vec4((colore * 0.8 + 0.2) * luce * v_aperto, 0.0);
 }
 """
 
@@ -480,6 +636,7 @@ FS_FINALE = """
 #version 330
 uniform sampler2D scena, a0, a1, a2, a3, a4, a5, webcam;
 uniform float t, seme, glitch, energia, sfondo, bagliore, lampo, colpo, rapporto, luce_sfondo;
+uniform float copertura;
 uniform vec2 dimensione;
 in vec2 uv;
 out vec4 f;
@@ -512,7 +669,9 @@ void main() {
     c += (caso(uv * dimensione + t) - 0.5) * 0.035;            // grana
     c *= 0.94 + 0.06 * caso(vec2(t, 3.0));                     // sfarfallio
 
-    vec3 fondo = texture(webcam, vec2(uv.x, 1.0 - uv.y)).bgr * luce_sfondo * sfondo;
+    // sotto maschera e armatura la webcam si scurisce, cosi' sembrano solide e non proiettate
+    float coperto = clamp(texture(scena, p).a, 0.0, 1.0) * copertura;
+    vec3 fondo = texture(webcam, vec2(uv.x, 1.0 - uv.y)).bgr * luce_sfondo * sfondo * (1.0 - coperto);
     f = vec4(fondo + c, 1.0);
 }
 """
@@ -559,6 +718,13 @@ class Ologramma:
         self.sfumatura = 1.0              # 0 = bordo netto, 1 = il volto svanisce verso il contorno
         self.corna = 1.0                  # lunghezza delle corna (0 = nessuna)
         self._corna_prima = 1.0
+        self.ali = 1.0                    # grandezza delle ali (0 = nessuna)
+        self._ali_prima = 1.0
+        self.copertura = 0.85             # quanto maschera e armatura oscurano la webcam sotto
+        self.armatura = True              # contorno luminoso del corpo, dal collo in giu'
+        self.spalle = None                # (2, 2) spalle tracciate, in coordinate normalizzate
+        self._spalle_viste = -99.0
+        self.ha_sagoma = False
         self.luce_sfondo = 0.30           # luminosita' della webcam quando fa da sfondo
         self.rapporto = 1.0               # grandezza del volto a schermo rispetto a quella "piena"
         self.preset(1)
@@ -592,6 +758,8 @@ class Ologramma:
         self.p_tratti = P(VS_TRATTI, FS_TRATTI)
         self.p_denti = P(VS_DENTI, FS_DENTI)
         self.p_gola = P(VS_DENTI, FS_GOLA)
+        self.p_ali = P(VS_DENTI, FS_ALI)
+        self.p_armatura = P(VS_DENTI, FS_ARMATURA)
         self.p_iride = P(VS_IRIDE, FS_IRIDE)
         self.p_scia = P(VS_SCHERMO, FS_SCIA)
         self.p_sfoca = P(VS_SCHERMO, FS_SFOCA)
@@ -621,6 +789,17 @@ class Ologramma:
         self.v_denti = A(self.p_denti, self.b_denti, "3f 2f 2f", "in_pos", "in_uv", "in_par",
                          indici=ctx.buffer(quadri.astype("i4").tobytes()))
         self.v_gola = A(self.p_gola, self.b_gola, "3f 2f 2f", "in_pos", "in_uv", "in_par")
+        self.b_armatura = ctx.buffer(reserve=6 * 7 * 4, dynamic=True)
+        self.v_armatura = A(self.p_armatura, self.b_armatura, "3f 2f 2f", "in_pos", "in_uv", "in_par")
+        self.b_ali = ctx.buffer(reserve=12 * 7 * 4, dynamic=True)
+        self.v_ali = A(self.p_ali, self.b_ali, "3f 2f 2f", "in_pos", "in_uv", "in_par")
+        glifi = atlante_glifi()
+        self.t_glifi = ctx.texture(glifi.shape[::-1], 1, glifi.tobytes(), dtype="f1")
+        self.t_glifi.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self.t_glifi.repeat_x = self.t_glifi.repeat_y = False
+        self.t_sagoma = ctx.texture(SAGOMA_DIM, 2, dtype="f1")
+        self.t_sagoma.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self.t_sagoma.repeat_x = self.t_sagoma.repeat_y = False
         self.v_iridi = A(self.p_iride, self.b_iridi, "3f 1f 1f", "in_pos", "in_dim", "in_aperto")
         quad = ctx.buffer(np.array([-1, -1, 3, -1, -1, 3], "f4").tobytes())
         V = lambda prog: A(prog, quad, "2f", "in_pos")
@@ -650,6 +829,13 @@ class Ologramma:
         nome, self.tinta, self.saturazione, self.n_linee, self.bagliore, self.spessore = PRESET[numero]
         return nome
 
+    def carica_sagoma(self, maschera):
+        """maschera: uint8 (alt, larg, 2) grande SAGOMA_DIM. Canale 0: 255 dove c'e' la persona;
+        canale 1: distanza dal bordo del corpo. None = non disponibile."""
+        self.ha_sagoma = maschera is not None
+        if self.ha_sagoma:
+            self.t_sagoma.write(np.ascontiguousarray(maschera).tobytes())
+
     def carica_webcam(self, fotogramma):
         h, w = fotogramma.shape[:2]
         if self.t_webcam is None or self.t_webcam.size != (w, h):
@@ -664,7 +850,13 @@ class Ologramma:
         return dati[::-1, :, ::-1]
 
     # ------------------------------------------------------------ fisica
-    def aggiorna(self, punti, espressioni, dt, livello_audio=0.0, t=0.0):
+    def aggiorna(self, punti, espressioni, dt, livello_audio=0.0, t=0.0, spalle=None):
+        if spalle is not None:             # spalle tracciate: le inseguo con dolcezza
+            if self.spalle is None or t - self._spalle_viste > 1.0:
+                self.spalle = spalle.copy()
+            self.spalle += min(1.0, dt * 12.0) * (spalle - self.spalle)
+            self._spalle_viste = t
+        self._t = t
         e = espressioni or {}
         media = lambda a, b: (e.get(a, 0.0) + e.get(b, 0.0)) / 2
         k = min(1.0, dt * 9.0)
@@ -713,14 +905,34 @@ class Ologramma:
             # volto perso: resta fermo e si dissolve da fuori verso il naso
             self.presenza = max(0.0, self.presenza - dt * 1.4)
 
+    def busto(self):
+        """Le due spalle (sinistra e destra dell'immagine) in unita' di schermo.
+        Se il corpo non e' tracciato le stimo dal volto: sotto il mento, larghe poco piu' di due teste."""
+        if self.spalle is not None and getattr(self, "_t", 0.0) - self._spalle_viste < 1.0:
+            return self._unita(np.hstack([self.spalle, np.zeros((2, 1), np.float32)]))
+        alto, basso = self._unita(self.pos[10]), self._unita(self.pos[152])
+        testa = np.linalg.norm(basso - alto)
+        centro = (alto + basso) / 2 + np.float32([0, 1.0, 0]) * testa
+        centro[2] = 0.0
+        lato = np.float32([1.1, 0, 0]) * testa
+        return np.stack([centro - lato, centro + lato])
+
     def _inquadra(self, k):
         """Centro e zoom inseguono il volto (o tornano alla posizione reale)."""
         if self.adatta:
             alto, basso = self._unita(self.pos[10]), self._unita(self.pos[152])
-            # con le corna l'inquadratura si allarga e sale, per non tagliarle
+            # con corna e ali l'inquadratura si allarga e sale, per non tagliarle
             spazio_corna = min(self.corna, 1.6) * 0.26
             centro = (alto + basso) / 2 - (basso - alto) * (spazio_corna * 0.5)
             zoom = self.grandezza / (np.linalg.norm(alto - basso) * (1.0 + spazio_corna * 0.6) + 1e-6)
+            if self.ali > 0.01 or self.armatura:
+                # con ali o armatura l'inquadratura comprende anche il busto
+                spalle = self.busto()
+                cima = alto + (alto - basso) * (0.30 + spazio_corna)
+                sotto = 0.60 if self.armatura else 0.32
+                fondo = spalle.mean(axis=0) + np.float32([0, sotto, 0]) * np.linalg.norm(spalle[1] - spalle[0])
+                centro = np.float32([centro[0], (cima[1] + fondo[1]) / 2, centro[2]])
+                zoom = min(zoom, 0.92 / (abs(fondo[1] - cima[1]) + 1e-6))
         else:
             centro, zoom = self.centro_schermo, 1.0
         self.centro += k * (centro - self.centro)
@@ -862,10 +1074,58 @@ class Ologramma:
         self.b_iridi.write(dati.tobytes())
 
         self._prepara_bocca(P0, destra, giu, dietro, L, bocca, t)
+        if self.ali > 0.01:
+            self._prepara_ali(t)
+        if self.armatura and self.ha_sagoma:
+            self._prepara_armatura(t)
         if self.corna > 0.01:
             campo_corna = self._prepara_corna(P0, nv, campo, destra, giu, avanti, L, bocca, t)
             return N_PUNTINI, L, max(float(campo.max()), campo_corna), pieno
         return N_PUNTINI, L, float(campo.max()), pieno
+
+    def _prepara_armatura(self, t):
+        """Un grande rettangolo ancorato alle spalle: lo shader ci disegna il contorno del corpo."""
+        porta = lambda Q: (Q - self.centro) * self.zoom + self.centro_schermo
+        spalle = porta(self.busto())
+        S = np.linalg.norm(spalle[1, :2] - spalle[0, :2]) + 1e-6
+        destra = np.float32([*(spalle[1, :2] - spalle[0, :2]) / S, 0.0])
+        giu = np.float32([-destra[1], destra[0], 0.0])
+        centro = spalle.mean(axis=0)
+        centro[2] = 0.0
+        vertici = []
+        for a, b in ((-1, -1), (1, -1), (-1, 1), (-1, 1), (1, -1), (1, 1)):
+            x, y = a * 2.60, (-0.45 if b < 0 else 3.00)
+            vertici.append([*(centro + destra * (x * S) + giu * (y * S)), x, y, 0.0, 0.0])
+        dati = np.array(vertici, np.float32)
+        dati[:, :3] = self._proietta(dati[:, :3], t)
+        dati[:, 2] = 0.9997               # dietro al volto e alla bocca, davanti alle ali
+        self.b_armatura.write(dati.tobytes())
+
+    def _prepara_ali(self, t):
+        """Due grandi rettangoli attaccati alla schiena, tra le spalle: la forma dell'ala la
+        disegna lo shader."""
+        # spalle nello stesso spazio (centrato e ingrandito) in cui e' disegnato il volto
+        spalle = (self.busto() - self.centro) * self.zoom + self.centro_schermo
+        larg = np.linalg.norm(spalle[1, :2] - spalle[0, :2]) + 1e-6
+        destra = np.float32([*(spalle[1, :2] - spalle[0, :2]) / larg, 0.0])   # lungo le spalle
+        su = np.float32([destra[1], -destra[0], 0.0])                          # verso la testa
+        dietro = np.float32([0.0, 0.0, 1.0])
+        # si aprono con rabbia, bocca aperta e voce; altrimenti battono piano, un po' raccolte
+        apertura = max(self.rabbia, 0.6 * self.energia, 0.5 * self.voce)
+        angolo = 0.38 + 0.16 * np.sin(t * 1.4) - 0.34 * apertura
+        attacco = spalle.mean(axis=0) - su * (0.15 * larg) + dietro * (0.25 * larg)   # scapole
+        misura = self.ali * larg * 0.60
+        vertici = []
+        for lato in (-1.0, 1.0):
+            fuori = (destra * lato) * np.cos(angolo) + dietro * np.sin(angolo)
+            origine = attacco + destra * (lato * 0.16 * larg)
+            for u, v in ((0, 0), (1, 0), (0, 1), (0, 1), (1, 0), (1, 1)):
+                Q = origine + fuori * (u * 1.9 * misura) + su * ((v - 0.41) * 2.2 * misura)
+                vertici.append(np.hstack([Q, [u, v, 0.0, 0.0]]))
+        dati = np.array(vertici, np.float32)
+        dati[:, :3] = self._proietta(dati[:, :3], t)
+        dati[:, 2] = 0.9999               # in fondo a tutto: volto, corna e bocca le coprono
+        self.b_ali.write(dati.tobytes())
 
     def _prepara_corna(self, P, nv, campo, destra, giu, avanti, L, bocca, t):
         """Due corna da maschera oni: partono dalla fronte, vanno in avanti e curvano in alto."""
@@ -952,7 +1212,7 @@ class Ologramma:
 
         # ---- 1) scena
         self.f_scena.use()
-        self.f_scena.clear(0, 0, 0, 1, depth=1.0)
+        self.f_scena.clear(0, 0, 0, 0, depth=1.0)
         additivo = lambda: (ctx.enable(moderngl.BLEND), setattr(ctx, "blend_func",
                                                                 (moderngl.ONE, moderngl.ONE)))
         if self.pos is not None and self.presenza > 0.001:
@@ -985,6 +1245,34 @@ class Ologramma:
                 if self.denti:
                     imposta(self.p_denti, colore=colore, forza=pieno)
                     self.v_denti.render(moderngl.TRIANGLES)
+
+            inquadra = dict(zoom=float(self.zoom), aspetto=float(self.aspetto),
+                            centro=(float(self.centro[0]), float(self.centro[1])),
+                            scena=(float(w * self.ss), float(h * self.ss)))
+            if self.armatura and self.ha_sagoma and pieno > 0:   # scrive la profondita': copre le ali
+                ctx.disable(moderngl.BLEND)
+                self.t_sagoma.use(1)
+                imposta(self.p_armatura, colore=colore, tempo=tempo, forza=pieno, sagoma=1,
+                        fase=self.fase, spessore=self.spessore * self.ss * self.rapporto ** 0.6,
+                        **inquadra)
+                self.v_armatura.render(moderngl.TRIANGLES, vertices=6)
+
+            if self.ali > 0.01 and pieno > 0:   # dietro a tutto, fatte di caratteri
+                additivo()
+                ctx.depth_mask = False
+                alt_cella = max(8.0, h * self.ss / ALI_RIGHE)
+                self.t_glifi.use(0)
+                self.t_sagoma.use(1)
+                imposta(self.p_ali, atlante=0, sagoma=1, colore=colore, tempo=tempo,
+                        forza=0.55 * pieno, cella=(alt_cella * 0.62, alt_cella),
+                        n_glifi=float(len(GLIFI)),
+                        usa_sagoma=1.0 if (self.ha_sagoma and (self.sfondo or self.armatura)) else 0.0,
+                        zoom=float(self.zoom), aspetto=float(self.aspetto),
+                        centro=(float(self.centro[0]), float(self.centro[1])),
+                        scena=(float(w * self.ss), float(h * self.ss)))
+                self.v_ali.render(moderngl.TRIANGLES, vertices=12)
+                ctx.depth_mask = True
+                ctx.disable(moderngl.BLEND)
 
             additivo()
             ctx.depth_mask = False
@@ -1033,7 +1321,7 @@ class Ologramma:
                     if self.glitch else 0.0),
             energia=self.energia, lampo=self.lampo, colpo=self.colpo,
             bagliore=self.bagliore * self.rapporto ** 0.5 * (1.0 + 0.3 * self.energia + 0.2 * self.voce),
-            rapporto=self.rapporto, luce_sfondo=self.luce_sfondo,
+            rapporto=self.rapporto, luce_sfondo=self.luce_sfondo, copertura=self.copertura,
             sfondo=1.0 if (self.sfondo and self.t_webcam is not None) else 0.0,
             dimensione=(float(w), float(h)))
 
@@ -1153,6 +1441,16 @@ def salva_impostazioni(olo, percorso=FILE_IMPOSTAZIONI):
 
 
 # ================================================================ ingressi
+def sagoma_con_distanza(maschera):
+    """Da una maschera 0..255 (persona = chiaro) alla coppia di canali che usano gli shader:
+    la maschera stessa e la distanza di ogni punto dal bordo del corpo (0 sul bordo, 255 a un
+    ottavo della larghezza dell'immagine o piu')."""
+    dentro = (maschera > 127).astype(np.uint8)
+    distanza = cv2.distanceTransform(dentro, cv2.DIST_L2, 3)
+    distanza = cv2.GaussianBlur(distanza, (0, 0), 1.2) * (255.0 / (maschera.shape[1] / 8.0))
+    return np.dstack([maschera, np.clip(distanza, 0, 255)]).astype(np.uint8)
+
+
 def scarica(nome, url):
     if not os.path.exists(nome):
         print(f"Scarico {nome} (solo la prima volta)...")
@@ -1195,7 +1493,9 @@ class Tracciatore(threading.Thread):
         self.attivo = True
         self.numero = 0                    # contatore dei fotogrammi elaborati
         self.punti = self.espressioni = self.fotogramma = None
-        self.filtro = FiltroEuro()
+        self.spalle = self.sagoma = None
+        self.usa_corpo = True              # il thread principale lo spegne quando le ali sono spente
+        self.filtro, self.filtro_spalle = FiltroEuro(), FiltroEuro(taglio_min=1.0, beta=8.0)
 
         scarica(MODELLO, URL_MODELLO)
         self.volto = vision.FaceLandmarker.create_from_options(vision.FaceLandmarkerOptions(
@@ -1203,9 +1503,47 @@ class Tracciatore(threading.Thread):
             running_mode=vision.RunningMode.VIDEO,
             num_faces=1,
             output_face_blendshapes=True))
+        try:        # corpo: spalle (per attaccare le ali) e sagoma della persona (per nasconderle dietro)
+            scarica(MODELLO_CORPO, URL_CORPO)
+            self.corpo = vision.PoseLandmarker.create_from_options(vision.PoseLandmarkerOptions(
+                base_options=mp_python.BaseOptions(model_asset_path=MODELLO_CORPO),
+                running_mode=vision.RunningMode.VIDEO,
+                num_poses=1,
+                output_segmentation_masks=True))
+        except Exception as errore:
+            print("Tracciamento del corpo non disponibile, stimo le spalle dal volto:", errore)
+            self.corpo = None
+
+    def _traccia_corpo(self, immagine, ms, adesso):
+        """Aggiorna spalle e sagoma. Qualsiasi errore spegne il tracciamento del corpo."""
+        try:
+            risultato = self.corpo.detect_for_video(immagine, ms)
+            spalle = None
+            if risultato.pose_landmarks:
+                a, b = risultato.pose_landmarks[0][11], risultato.pose_landmarks[0][12]
+                if min(a.visibility, b.visibility) > 0.5:
+                    spalle = np.float32(sorted([[a.x, a.y], [b.x, b.y]]))   # sinistra, destra
+                    spalle = self.filtro_spalle(spalle, adesso).astype(np.float32)
+            if spalle is None:
+                self.filtro_spalle.azzera()
+            sagoma = None
+            if risultato.segmentation_masks:
+                m = np.asarray(risultato.segmentation_masks[0].numpy_view(), np.float32)
+                m = cv2.resize(m.reshape(m.shape[0], m.shape[1]), SAGOMA_DIM,
+                               interpolation=cv2.INTER_AREA)
+                m = cv2.GaussianBlur(np.clip(m * 255.0, 0, 255), (0, 0), 1.0)   # bordo morbido
+                vecchia = self._sagoma_f if getattr(self, "_sagoma_f", None) is not None else m
+                self._sagoma_f = vecchia * 0.25 + m * 0.75          # un filo di stabilita' sui bordi
+                sagoma = sagoma_con_distanza(self._sagoma_f)
+            return spalle, sagoma
+        except Exception as errore:
+            print("Tracciamento del corpo disattivato:", errore)
+            self.corpo = None
+            return None, None
 
     def run(self):
-        ultimo_ms = 0
+        ultimo_ms, n = 0, 0
+        spalle = sagoma = None
         while self.attivo:
             ok, fotogramma = self.cam.read()
             if not ok:
@@ -1229,13 +1567,22 @@ class Tracciatore(threading.Thread):
             else:
                 self.filtro.azzera()
 
+            # corpo: solo se ali o armatura sono accese
+            if self.corpo is None or not self.usa_corpo:
+                spalle = sagoma = None
+            elif n % CORPO_OGNI == 0:
+                spalle, sagoma = self._traccia_corpo(immagine, ms, adesso)
+            n += 1
+
             with self.blocco:
                 self.punti, self.espressioni, self.fotogramma = punti, espressioni, fotogramma
+                self.spalle, self.sagoma = spalle, sagoma
                 self.numero += 1
 
     def leggi(self):
         with self.blocco:
-            return self.numero, self.punti, self.espressioni, self.fotogramma
+            return (self.numero, self.punti, self.espressioni, self.fotogramma,
+                    self.spalle, self.sagoma)
 
 
 class Microfono:
@@ -1309,7 +1656,7 @@ def main():
         print("Webcam virtuale attiva:", virtuale.device)
 
     stato = dict(selettore=False, adatta=True, screenshot=False, video=None, intero=None)
-    alterna = {glfw.KEY_O: "iridi", glfw.KEY_D: "denti", glfw.KEY_T: "tratti",
+    alterna = {glfw.KEY_O: "iridi", glfw.KEY_D: "denti", glfw.KEY_T: "tratti", glfw.KEY_Y: "armatura",
                glfw.KEY_G: "glitch", glfw.KEY_B: "sfondo"}
     prossimo = lambda elenco, attuale: elenco[(elenco.index(attuale) + 1) % len(elenco)]
 
@@ -1337,6 +1684,11 @@ def main():
                 olo._corna_prima, olo.corna = olo.corna, 0.0
             else:
                 olo.corna = olo._corna_prima or 1.0
+        elif codice == glfw.KEY_A:                                # ali: spegne e riaccende
+            if olo.ali > 0.01:
+                olo._ali_prima, olo.ali = olo.ali, 0.0
+            else:
+                olo.ali = olo._ali_prima or 1.0
         elif codice == glfw.KEY_M:
             olo.stile = prossimo(STILI, olo.stile)
         elif codice == glfw.KEY_L:
@@ -1402,15 +1754,17 @@ def main():
             scegli_colore()
             prima = time.monotonic()                              # niente salto dopo la pausa
 
-        numero, punti, espressioni, fotogramma = tracciatore.leggi()
+        tracciatore.usa_corpo = olo.ali > 0.01 or olo.armatura
+        numero, punti, espressioni, fotogramma, spalle, sagoma = tracciatore.leggi()
         if numero != visto:                                       # c'e' un fotogramma nuovo
             visto = numero
+            olo.carica_sagoma(sagoma)
             if olo.sfondo and fotogramma is not None:
                 olo.carica_webcam(fotogramma)
 
         # con la webcam sullo sfondo la maschera deve restare sovrapposta al volto vero
         olo.adatta = stato["adatta"] and not olo.sfondo
-        olo.aggiorna(punti, espressioni, dt, microfono.livello, t)
+        olo.aggiorna(punti, espressioni, dt, microfono.livello, t, spalle)
         olo.disegna(t, dt)
 
         # sulla finestra, mantenendo le proporzioni (bande nere se servono)

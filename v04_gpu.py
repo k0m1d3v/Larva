@@ -6,8 +6,8 @@ Installazione:
     pip install pyvirtualcam        (solo per la webcam virtuale)
 
 Avvio:
-    python maschera.py              finestra normale
-    python maschera.py --virtuale   in piu' manda l'immagine a una webcam virtuale
+    python v04_gpu.py              finestra normale
+    python v04_gpu.py --virtuale   in piu' manda l'immagine a una webcam virtuale
                                     (Windows/macOS: serve OBS installato;
                                      Linux: serve il modulo v4l2loopback)
 

@@ -1,5 +1,5 @@
 """
-Maschera olografica in tempo reale dalla webcam (v6, rendering su GPU).
+Maschera olografica in tempo reale dalla webcam (v7, rendering su GPU).
 
 Installazione:
     pip install mediapipe opencv-python numpy moderngl glfw
@@ -7,24 +7,28 @@ Installazione:
     pip install pyvirtualcam        (facoltativo: webcam virtuale)
 
 Avvio:
-    python maschera.py              finestra normale
-    python maschera.py --virtuale   in piu' manda l'immagine a una webcam virtuale
+    python v09_ascii_wings.py              finestra normale
+    python v09_ascii_wings.py --virtuale   in piu' manda l'immagine a una webcam virtuale
                                     (Windows/macOS: serve OBS installato;
                                      Linux: serve il modulo v4l2loopback)
 
 Tasti:
+    TAB  pannello con i cursori (linee, bagliore, scia, prospettiva, colore...)
     1-4  preset: ciano, rosso allarme, oro, bianco e nero
     l    motivo delle linee: curve di livello / anelli attorno a occhi e bocca / scansione
     m    stile: ologramma / solo puntini / solo linee
-    h    testa completa <-> solo ovale del volto
     z    volto centrato, ingrandito e in prospettiva <-> posizione reale
     o    iridi            d  denti            t  tratti (sopracciglia, occhi, labbra)
+    k    corna            a  ali da demone in caratteri ASCII (misure dal pannello)
     g    glitch           b  sfondo nero <-> webcam scurita
     p    selettore di colore di sistema
     frecce sinistra/destra  tinta          frecce su/giu'  saturazione
     f    schermo intero
     s    salva uno screenshot (PNG)       r  avvia/ferma la registrazione video (MP4)
     q    esci
+
+Le impostazioni vengono salvate in maschera_impostazioni.json alla chiusura
+e ricaricate all'avvio (cancella il file per tornare ai valori iniziali).
 
 Reazioni:
     voce                    -> un'onda di luce parte dalla bocca a ogni sillaba
@@ -36,6 +40,7 @@ Reazioni:
 """
 
 import colorsys
+import json
 import os
 import sys
 import threading
@@ -52,8 +57,10 @@ from mediapipe.tasks.python import vision
 # ---------------------------------------------------------------- parametri
 CAMERA = 0            # indice della webcam
 ALTEZZA = 0           # risoluzione verticale del rendering; 0 = quella del monitor (max 1080)
-GRANDEZZA = 0.60      # con 'z' attivo: altezza del volto rispetto alla finestra
-PROSPETTIVA = 0.9     # 0 = proiezione piatta; piu' alto = piu' profondita'
+SOVRACAMPIONA = 2     # la scena e' disegnata a risoluzione x2 e poi ridotta (1 = spento)
+N_ALONI = 6           # scale del bagliore: piu' sono, piu' l'alone e' largo e morbido
+GRANDEZZA = 0.64      # con 'z' attivo: altezza del volto rispetto alla finestra
+PROSPETTIVA = 0.9     # valore iniziale. 0 = proiezione piatta; piu' alto = piu' profondita'
 OSCILLAZIONE = 0.10   # ampiezza (radianti) del dondolio della camera virtuale
 SCIA = 0.80           # persistenza della scia (0 = nessuna, 0.95 = lunghissima)
 MODELLO = "face_landmarker.task"
@@ -61,6 +68,8 @@ URL_MODELLO = (
     "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
     "face_landmarker/float16/1/face_landmarker.task"
 )
+FILE_IMPOSTAZIONI = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "maschera_impostazioni.json")
 STILI = ["ologramma", "puntini", "linee"]
 MOTIVI = ["livello", "anelli", "scansione"]
 #          nome             tinta  satur.  linee  bagliore  spessore
@@ -85,57 +94,49 @@ def _triangoli():
     return np.array(tri, np.int32)
 
 
-def _suddividi(tri):
-    """Divide ogni triangolo in quattro: restituisce gli spigoli e i nuovi triangoli."""
+def _suddividi(tri, primo):
+    """Divide ogni triangolo in quattro: restituisce gli spigoli e i nuovi triangoli.
+    primo: indice del primo vertice nuovo (i punti medi vengono accodati agli esistenti)."""
     spigoli = np.unique(np.sort(np.vstack([tri[:, [0, 1]], tri[:, [1, 2]], tri[:, [2, 0]]]), 1), axis=0)
-    indice = {tuple(s): 478 + i for i, s in enumerate(spigoli)}
+    indice = {tuple(s): primo + i for i, s in enumerate(spigoli)}
     meta = lambda a, b: indice[(min(a, b), max(a, b))]
     nuovi = []
     for a, b, c in tri:
         ab, bc, ca = meta(a, b), meta(b, c), meta(c, a)
         nuovi += [(a, ab, ca), (ab, b, bc), (ca, bc, c), (ab, bc, ca)]
-    return spigoli.astype(np.int32), np.array(nuovi, np.int32), indice
-
-
-def _anello_ovale(indice):
-    """Il contorno del volto come anello ordinato (con i punti medi, per non lasciare fessure)."""
-    dopo = {c.start: c.end for c in _FLC.FACE_LANDMARKS_FACE_OVAL}
-    primo = next(iter(dopo))
-    giro, p = [primo], dopo[primo]
-    while p != primo and len(giro) < 100:
-        giro.append(p)
-        p = dopo[p]
-    anello = []
-    for a, b in zip(giro, giro[1:] + giro[:1]):
-        anello.append(a)
-        medio = indice.get((min(a, b), max(a, b)))
-        if medio is not None:
-            anello.append(medio)
-    return np.array(anello, np.int32)
+    return spigoli.astype(np.int32), np.array(nuovi, np.int32)
 
 
 TRIANGOLI = _triangoli()
-SPIGOLI, TRI_FINI, _INDICE = _suddividi(TRIANGOLI)
-N_VERTICI = 478 + len(SPIGOLI)
-
-# testa completa: anelli aggiuntivi oltre l'ovale. (raggio, arretramento, peso della normale)
-ANELLO = _anello_ovale(_INDICE)
-PROFILO = [(0.035, 0.07, 0.45), (0.075, 0.20, 0.70), (0.095, 0.38, 0.90), (0.100, 0.60, 1.00)]
-N_TOTALE = N_VERTICI + len(PROFILO) * len(ANELLO)
+# due suddivisioni: ogni triangolo della mesh diventa 16, cosi' le linee escono curve e non a zig-zag
+SPIGOLI, _TRI_MEDI = _suddividi(TRIANGOLI, 478)
+N_PUNTINI = 478 + len(SPIGOLI)                # i puntini usano solo il primo livello
+SPIGOLI_2, TRI_FINI = _suddividi(_TRI_MEDI, N_PUNTINI)
+N_VERTICI = N_PUNTINI + len(SPIGOLI_2)
 
 
-def _triangoli_testa():
-    R, tri = len(ANELLO), []
-    for k in range(len(PROFILO)):
-        dentro = ANELLO if k == 0 else N_VERTICI + (k - 1) * R + np.arange(R)
-        fuori = N_VERTICI + k * R + np.arange(R)
-        for i in range(R):
-            j = (i + 1) % R
-            tri += [(dentro[i], fuori[i], dentro[j]), (dentro[j], fuori[i], fuori[j])]
-    return np.array(tri, np.int32)
+def _distanza_dal_bordo():
+    """Per ogni vertice, quanti spigoli lo separano dal contorno esterno del volto."""
+    vicini = {}
+    for a, b in SPIGOLI:
+        vicini.setdefault(int(a), set()).add(int(b))
+        vicini.setdefault(int(b), set()).add(int(a))
+    dist = np.full(478, 99.0, np.float32)
+    fronte = ({c.start for c in _FLC.FACE_LANDMARKS_FACE_OVAL}
+              | {c.end for c in _FLC.FACE_LANDMARKS_FACE_OVAL})
+    passo = 0
+    while fronte:
+        for v in fronte:
+            dist[v] = passo
+        fronte = {n for v in fronte for n in vicini.get(v, ()) if dist[n] > passo + 1}
+        passo += 1
+    dist[dist > 50] = 5.0                       # punti isolati (iridi): mai sfumati
+    for spigoli in (SPIGOLI, SPIGOLI_2):        # i punti medi prendono la media degli estremi
+        dist = np.concatenate([dist, (dist[spigoli[:, 0]] + dist[spigoli[:, 1]]) / 2])
+    return dist
 
 
-TRI_TESTA = _triangoli_testa()
+DAL_BORDO = _distanza_dal_bordo()
 
 # tratti evidenziati: segmenti di labbra, occhi e sopracciglia
 SEGMENTI = np.array(
@@ -143,8 +144,56 @@ SEGMENTI = np.array(
         _FLC.FACE_LANDMARKS_LIPS, _FLC.FACE_LANDMARKS_LEFT_EYE, _FLC.FACE_LANDMARKS_RIGHT_EYE,
         _FLC.FACE_LANDMARKS_LEFT_EYEBROW, _FLC.FACE_LANDMARKS_RIGHT_EYEBROW) for c in gruppo],
     np.int32)
+# corna: tronchi di cono curvi. (anelli lungo il corno, punti per anello, punto d'attacco)
+CORNA_SEZIONI, CORNA_LATI = 18, 14
+CORNA_ATTACCHI = (67, 297)            # punti alti della fronte, uno per lato
+
+
+def _triangoli_corna():
+    tri = []
+    per_corno = (CORNA_SEZIONI + 1) * CORNA_LATI
+    for c in range(2):
+        for i in range(CORNA_SEZIONI):
+            for j in range(CORNA_LATI):
+                a = c * per_corno + i * CORNA_LATI + j
+                b = c * per_corno + i * CORNA_LATI + (j + 1) % CORNA_LATI
+                tri += [(a, b, a + CORNA_LATI), (b, b + CORNA_LATI, a + CORNA_LATI)]
+    return np.array(tri, np.int32)
+
+
+TRI_CORNA = _triangoli_corna()
+ALI_RIGHE = 42                # righe di caratteri sull'altezza dello schermo (meno = piu' grandi)
+GLIFI = " .:;!/|*#%@"         # caratteri delle ali, dal piu' vuoto al piu' pieno
+
+
+def atlante_glifi(cella=(40, 64)):
+    """Una striscia con tutti i caratteri, uno per cella: lo shader delle ali pesca da qui."""
+    w, h = cella
+    img = np.zeros((h, w * len(GLIFI)), np.uint8)
+    for i, c in enumerate(GLIFI):
+        (lw, lh), _ = cv2.getTextSize(c, cv2.FONT_HERSHEY_DUPLEX, 1.5, 2)
+        cv2.putText(img, c, (i * w + (w - lw) // 2, (h + lh) // 2), cv2.FONT_HERSHEY_DUPLEX,
+                    1.5, 255, 2, cv2.LINE_AA)
+    return img
 COLONNE_DENTI = 33    # suddivisioni di ogni arcata di denti
 N_IMPULSI = 6         # onde della voce visibili contemporaneamente
+# cursori del pannello: (etichetta, attributo di Ologramma, minimo, massimo)
+CURSORI = [
+    ("Linee", "n_linee", 8.0, 60.0),
+    ("Spessore", "spessore", 0.6, 3.0),
+    ("Bagliore", "bagliore", 0.0, 2.5),
+    ("Scia", "scia", 0.0, 0.95),
+    ("Prospettiva", "prospettiva", 0.0, 1.6),
+    ("Dondolio", "oscillazione", 0.0, 0.30),
+    ("Grandezza", "grandezza", 0.30, 0.90),
+    ("Tinta", "tinta", 0.0, 1.0),
+    ("Saturazione", "saturazione", 0.0, 1.0),
+    ("Corna", "corna", 0.0, 1.6),
+    ("Ali", "ali", 0.0, 1.5),
+    ("Bordo sfumato", "sfumatura", 0.0, 1.0),
+    ("Luce webcam", "luce_sfondo", 0.0, 1.0),
+]
+DA_SALVARE = [c[1] for c in CURSORI] + ["stile", "motivo", "iridi", "denti", "tratti", "glitch"]
 rng = np.random.default_rng()
 
 
@@ -156,6 +205,8 @@ in vec3 in_pos;
 in float in_campo;
 in float in_bocca;
 in vec3 in_n;
+in float in_bordo;
+out float v_bordo;
 out float v_campo;
 out float v_bocca;
 out vec3 v_n;
@@ -170,6 +221,7 @@ void main() {
     v_bocca = in_bocca;
     v_n = in_n;
     v_ndc = in_pos.xy;
+    v_bordo = in_bordo;
 }
 """
 
@@ -177,7 +229,8 @@ FS_MESH = """
 #version 330
 uniform vec3 colore;
 uniform float n_linee, fase, spessore, energia, y_fascio, mostra_linee, tempo;
-uniform float rivela, in_formazione, voce;
+uniform float rivela, in_formazione, voce, sfumatura;
+in float v_bordo;                   // 0 sul contorno del volto, cresce verso l'interno
 uniform vec2 impulsi[6];            // (eta' in secondi, ampiezza) delle onde della voce
 in float v_campo;
 in float v_bocca;
@@ -232,6 +285,9 @@ void main() {
     // fronte della materializzazione: una riga bianca che avanza
     float soglia = exp(-pow((rivela - v_campo) / 0.03, 2.0)) * in_formazione;
     c += (colore * 0.4 + 0.6) * soglia * 1.6;
+
+    // il volto svanisce verso il contorno invece di finire con un taglio netto
+    c *= mix(1.0, smoothstep(0.0, 1.5, v_bordo), sfumatura);
 
     f = vec4(c * (1.0 + 0.25 * energia), 1.0);
 }
@@ -346,6 +402,82 @@ void main() {
 }
 """
 
+FS_ALI = """
+#version 330
+uniform sampler2D atlante;
+uniform vec3 colore;
+uniform vec2 cella;                 // misura di un carattere, in pixel
+uniform float tempo, forza, n_glifi;
+in vec2 v_uv;                       // x: 0 all'attacco, 1 in punta; y: 0 in basso, 1 in alto
+in vec2 v_par;
+out vec4 f;
+
+float caso(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+
+float segmento(vec2 p, vec2 a, vec2 b) {
+    vec2 pa = p - a, ba = b - a;
+    return length(pa - ba * clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0));
+}
+
+// distanza con segno da un poligono (negativa dentro)
+float poligono(vec2 p, vec2 v[6]) {
+    float d = dot(p - v[0], p - v[0]);
+    float s = 1.0;
+    for (int i = 0, j = 5; i < 6; j = i, i++) {
+        vec2 e = v[j] - v[i], w = p - v[i];
+        vec2 b = w - e * clamp(dot(w, e) / dot(e, e), 0.0, 1.0);
+        d = min(d, dot(b, b));
+        bvec3 c = bvec3(p.y >= v[i].y, p.y < v[j].y, e.x * w.y > e.y * w.x);
+        if (all(c) || all(not(c))) s = -s;
+    }
+    return s * sqrt(d);
+}
+
+// incavo ad arco tra due punte: positivo dentro il cerchio da togliere
+float incavo(vec2 p, vec2 a, vec2 b, float fondo) {
+    vec2 m = (a + b) * 0.5, e = b - a;
+    vec2 n = normalize(vec2(e.y, -e.x));
+    float corda = length(e) * 0.5;
+    vec2 c = m - n * fondo;                                    // centro oltre il bordo dell'ala
+    return sqrt(corda * corda + fondo * fondo) - length(p - c);
+}
+
+// quanto e' "piena" l'ala in un punto: 0 fuori, fino a 1 sulle ossa
+float ala(vec2 uv) {
+    vec2 p = vec2(uv.x * 1.9, (uv.y - 0.41) * 2.2);
+    vec2 O = vec2(0.0, 0.0), W = vec2(0.50, 0.92), F0 = vec2(0.50, 1.28);
+    vec2 F1 = vec2(1.86, 1.18), F2 = vec2(1.78, 0.38), F3 = vec2(1.30, -0.28), B = vec2(0.14, -0.62);
+    vec2 v[6] = vec2[6](O, W, F1, F2, F3, B);
+    float d = poligono(p, v);
+    // bordo d'uscita a festoni, come un'ala di pipistrello
+    d = max(d, incavo(p, F1, F2, 0.55));
+    d = max(d, incavo(p, F2, F3, 0.50));
+    d = max(d, incavo(p, F3, B, 0.75));
+    float ossa = min(min(segmento(p, O, W), segmento(p, W, F1)),
+                     min(min(segmento(p, W, F2), segmento(p, W, F3)), segmento(p, W, F0)));
+    float osso = exp(-pow(ossa / 0.035, 2.0));
+    if (d > 0.0) return osso * 0.95;                           // fuori: resta solo l'artiglio
+    float orlo = exp(-pow(d / 0.05, 2.0));
+    float membrana = 0.34 + 0.16 * sin(length(p - W) * 9.0 - tempo * 2.5);
+    return clamp(max(osso, max(orlo * 0.75, membrana)), 0.0, 1.0);
+}
+
+void main() {
+    // griglia di caratteri: l'ala si valuta al centro di ogni cella, non pixel per pixel
+    vec2 cellaxy = floor(gl_FragCoord.xy / cella);
+    vec2 scarto = (cellaxy + 0.5) * cella - gl_FragCoord.xy;
+    vec2 uv = v_uv + dFdx(v_uv) * scarto.x + dFdy(v_uv) * scarto.y;
+    float pieno = ala(uv);
+    if (pieno <= 0.02) discard;
+    // i caratteri sfarfallano: ogni cella cambia un po' qualche volta al secondo
+    pieno = clamp(pieno * (0.75 + 0.5 * caso(cellaxy + floor(tempo * 7.0))), 0.0, 0.999);
+    float glifo = floor(pieno * n_glifi);
+    vec2 q = fract(gl_FragCoord.xy / cella);
+    float a = texture(atlante, vec2((glifo + q.x) / n_glifi, 1.0 - q.y)).r;
+    f = vec4((colore * 0.85 + 0.15) * a * (0.25 + 0.75 * pieno) * forza, 1.0);
+}
+"""
+
 VS_IRIDE = """
 #version 330
 in vec3 in_pos;
@@ -413,10 +545,31 @@ void main() {
 }
 """
 
+VS_PANNELLO = """
+#version 330
+in vec2 in_pos;
+in vec2 in_uv;
+out vec2 uv;
+void main() {
+    gl_Position = vec4(in_pos, 0.0, 1.0);
+    uv = in_uv;
+}
+"""
+
+FS_PANNELLO = """
+#version 330
+uniform sampler2D tex;
+in vec2 uv;
+out vec4 f;
+void main() {
+    f = texture(tex, uv);
+}
+"""
+
 FS_FINALE = """
 #version 330
-uniform sampler2D scena, alone1, alone2, webcam;
-uniform float t, seme, glitch, energia, sfondo, bagliore, lampo, colpo;
+uniform sampler2D scena, a0, a1, a2, a3, a4, a5, webcam;
+uniform float t, seme, glitch, energia, sfondo, bagliore, lampo, colpo, rapporto, luce_sfondo;
 uniform vec2 dimensione;
 in vec2 uv;
 out vec4 f;
@@ -424,8 +577,9 @@ out vec4 f;
 float caso(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
 
 vec3 luce(vec2 p) {
-    return texture(scena, p).rgb
-         + bagliore * (0.55 * texture(alone1, p).rgb + 0.95 * texture(alone2, p).rgb);
+    vec3 alone = 0.30 * texture(a0, p).rgb + 0.30 * texture(a1, p).rgb + 0.28 * texture(a2, p).rgb
+               + 0.26 * texture(a3, p).rgb + 0.24 * texture(a4, p).rgb + 0.22 * texture(a5, p).rgb;
+    return texture(scena, p).rgb + bagliore * alone;
 }
 
 void main() {
@@ -436,7 +590,7 @@ void main() {
         p.x += (caso(vec2(seme, banda)) - 0.5) * (0.14 + 0.2 * colpo);
 
     // aberrazione cromatica, piu' forte verso i bordi e quando apri la bocca
-    float ab = (0.0012 + 0.006 * energia + 0.012 * colpo) * (0.5 + length(uv - 0.5) * 2.0);
+    float ab = (0.0010 + 0.0015 * energia + 0.008 * colpo) * rapporto * (0.5 + length(uv - 0.5) * 2.0);
     vec3 c = vec3(luce(p + vec2(ab, 0.0)).r, luce(p).g, luce(p - vec2(ab, 0.0)).b);
 
     c *= 1.0 + 0.8 * lampo;                                    // sorpresa: lampo...
@@ -448,7 +602,7 @@ void main() {
     c += (caso(uv * dimensione + t) - 0.5) * 0.035;            // grana
     c *= 0.94 + 0.06 * caso(vec2(t, 3.0));                     // sfarfallio
 
-    vec3 fondo = texture(webcam, vec2(uv.x, 1.0 - uv.y)).bgr * 0.22 * sfondo;
+    vec3 fondo = texture(webcam, vec2(uv.x, 1.0 - uv.y)).bgr * luce_sfondo * sfondo;
     f = vec4(fondo + c, 1.0);
 }
 """
@@ -481,14 +635,24 @@ class Ologramma:
     def __init__(self, ctx, larghezza, altezza):
         self.ctx = ctx
         self.dim = (larghezza, altezza)
+        self.ss = max(1, int(SOVRACAMPIONA))         # fattore di sovracampionamento della scena
         self.aspetto = larghezza / altezza
         self.centro_schermo = np.array([self.aspetto / 2, 0.5, 0.0], np.float32)
 
         # ---- opzioni (cambiate dai tasti)
         self.stile, self.motivo = "ologramma", "livello"
         self.glitch, self.sfondo = True, False
-        self.iridi = self.denti = self.tratti = self.testa = True
+        self.iridi = self.denti = self.tratti = True
         self.adatta = True                # volto centrato, ingrandito e in prospettiva
+        self.grandezza, self.prospettiva = GRANDEZZA, PROSPETTIVA
+        self.oscillazione, self.scia = OSCILLAZIONE, SCIA
+        self.sfumatura = 1.0              # 0 = bordo netto, 1 = il volto svanisce verso il contorno
+        self.corna = 1.0                  # lunghezza delle corna (0 = nessuna)
+        self._corna_prima = 1.0
+        self.ali = 1.0                    # grandezza delle ali (0 = nessuna)
+        self._ali_prima = 1.0
+        self.luce_sfondo = 0.30           # luminosita' della webcam quando fa da sfondo
+        self.rapporto = 1.0               # grandezza del volto a schermo rispetto a quella "piena"
         self.preset(1)
 
         # ---- stato
@@ -520,23 +684,28 @@ class Ologramma:
         self.p_tratti = P(VS_TRATTI, FS_TRATTI)
         self.p_denti = P(VS_DENTI, FS_DENTI)
         self.p_gola = P(VS_DENTI, FS_GOLA)
+        self.p_ali = P(VS_DENTI, FS_ALI)
         self.p_iride = P(VS_IRIDE, FS_IRIDE)
         self.p_scia = P(VS_SCHERMO, FS_SCIA)
         self.p_sfoca = P(VS_SCHERMO, FS_SFOCA)
         self.p_finale = P(VS_SCHERMO, FS_FINALE)
 
         # ---- geometria
-        self.b_mesh = ctx.buffer(reserve=N_TOTALE * 8 * 4, dynamic=True)
-        self.b_punti = ctx.buffer(reserve=N_TOTALE * 5 * 4, dynamic=True)
+        self.b_mesh = ctx.buffer(reserve=N_VERTICI * 9 * 4, dynamic=True)
+        self.b_punti = ctx.buffer(reserve=N_PUNTINI * 5 * 4, dynamic=True)
         self.b_tratti = ctx.buffer(reserve=len(SEGMENTI) * 6 * 4 * 4, dynamic=True)
         self.b_denti = ctx.buffer(reserve=4 * COLONNE_DENTI * 7 * 4, dynamic=True)
         self.b_gola = ctx.buffer(reserve=6 * 7 * 4, dynamic=True)
+        self.b_corna = ctx.buffer(reserve=2 * (CORNA_SEZIONI + 1) * CORNA_LATI * 9 * 4, dynamic=True)
         self.b_iridi = ctx.buffer(reserve=2 * 5 * 4, dynamic=True)
-        indici = ctx.buffer(np.vstack([TRI_FINI, TRI_TESTA]).astype("i4").tobytes())
+        indici = ctx.buffer(TRI_FINI.astype("i4").tobytes())
         A = lambda prog, buf, formato, *nomi, indici=None: vertici(
             ctx, prog, buf, formato, *nomi, indici=indici)
-        self.v_mesh = A(self.p_mesh, self.b_mesh, "3f 1f 1f 3f",
-                        "in_pos", "in_campo", "in_bocca", "in_n", indici=indici)
+        self.v_corna = A(self.p_mesh, self.b_corna, "3f 1f 1f 3f 1f",
+                         "in_pos", "in_campo", "in_bocca", "in_n", "in_bordo",
+                         indici=ctx.buffer(TRI_CORNA.astype("i4").tobytes()))
+        self.v_mesh = A(self.p_mesh, self.b_mesh, "3f 1f 1f 3f 1f",
+                        "in_pos", "in_campo", "in_bocca", "in_n", "in_bordo", indici=indici)
         self.v_punti = A(self.p_punti, self.b_punti, "3f 1f 1f", "in_pos", "in_lum", "in_campo")
         self.v_tratti = A(self.p_tratti, self.b_tratti, "3f 1f", "in_pos", "in_lato")
         k = np.arange(COLONNE_DENTI - 1)
@@ -545,6 +714,12 @@ class Ologramma:
         self.v_denti = A(self.p_denti, self.b_denti, "3f 2f 2f", "in_pos", "in_uv", "in_par",
                          indici=ctx.buffer(quadri.astype("i4").tobytes()))
         self.v_gola = A(self.p_gola, self.b_gola, "3f 2f 2f", "in_pos", "in_uv", "in_par")
+        self.b_ali = ctx.buffer(reserve=12 * 7 * 4, dynamic=True)
+        self.v_ali = A(self.p_ali, self.b_ali, "3f 2f 2f", "in_pos", "in_uv", "in_par")
+        glifi = atlante_glifi()
+        self.t_glifi = ctx.texture(glifi.shape[::-1], 1, glifi.tobytes(), dtype="f1")
+        self.t_glifi.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self.t_glifi.repeat_x = self.t_glifi.repeat_y = False
         self.v_iridi = A(self.p_iride, self.b_iridi, "3f 1f 1f", "in_pos", "in_dim", "in_aperto")
         quad = ctx.buffer(np.array([-1, -1, 3, -1, -1, 3], "f4").tobytes())
         V = lambda prog: A(prog, quad, "2f", "in_pos")
@@ -558,12 +733,14 @@ class Ologramma:
             dep = ctx.depth_renderbuffer(dim) if profondita else None
             return ctx.framebuffer([tex], dep), tex
 
-        self.f_scena, self.t_scena = bersaglio(self.dim, True)
+        # la scena e' piu' grande dello schermo: ridurla dopo ammorbidisce bordi e puntini
+        self.f_scena, self.t_scena = bersaglio((larghezza * self.ss, altezza * self.ss), True)
         self.scie = [bersaglio(self.dim), bersaglio(self.dim)]
-        meta = (larghezza // 2, altezza // 2)
-        ottavo = (larghezza // 8, altezza // 8)
-        self.alone1 = [bersaglio(meta), bersaglio(meta)]
-        self.alone2 = [bersaglio(ottavo), bersaglio(ottavo)]
+        # piramide del bagliore: ogni livello e' la meta' del precedente
+        self.aloni = []
+        for i in range(1, N_ALONI + 1):
+            dim = (max(2, larghezza >> i), max(2, altezza >> i))
+            self.aloni.append([bersaglio(dim), bersaglio(dim)])
         self.f_uscita = ctx.framebuffer([ctx.texture(self.dim, 3)])   # per video e screenshot
         self.t_webcam = None
 
@@ -639,8 +816,10 @@ class Ologramma:
         """Centro e zoom inseguono il volto (o tornano alla posizione reale)."""
         if self.adatta:
             alto, basso = self._unita(self.pos[10]), self._unita(self.pos[152])
-            centro = (alto + basso) / 2
-            zoom = GRANDEZZA / (np.linalg.norm(alto - basso) + 1e-6)
+            # con corna e ali l'inquadratura si allarga e sale, per non tagliarle
+            spazio_corna = min(self.corna, 1.6) * 0.26 + min(self.ali, 1.5) * 0.22
+            centro = (alto + basso) / 2 - (basso - alto) * (spazio_corna * 0.5)
+            zoom = self.grandezza / (np.linalg.norm(alto - basso) * (1.0 + spazio_corna * 0.6) + 1e-6)
         else:
             centro, zoom = self.centro_schermo, 1.0
         self.centro += k * (centro - self.centro)
@@ -681,13 +860,13 @@ class Ologramma:
         """Camera virtuale: leggero dondolio e prospettiva, poi coordinate dello schermo."""
         q = np.asarray(Q, np.float32) - self.centro_schermo
         if self.spazio > 1e-3:
-            imb = OSCILLAZIONE * self.spazio * np.sin(t * 0.50)
-            bec = OSCILLAZIONE * 0.5 * self.spazio * np.sin(t * 0.37 + 1.0)
+            imb = self.oscillazione * self.spazio * np.sin(t * 0.50)
+            bec = self.oscillazione * 0.5 * self.spazio * np.sin(t * 0.37 + 1.0)
             c, s = np.cos(imb), np.sin(imb)
             q = np.stack([q[:, 0] * c + q[:, 2] * s, q[:, 1], -q[:, 0] * s + q[:, 2] * c], 1)
             c, s = np.cos(bec), np.sin(bec)
             q = np.stack([q[:, 0], q[:, 1] * c - q[:, 2] * s, q[:, 1] * s + q[:, 2] * c], 1)
-            q[:, :2] /= (1.0 + PROSPETTIVA * self.spazio * q[:, 2:3]).clip(0.3)
+            q[:, :2] /= (1.0 + self.prospettiva * self.spazio * q[:, 2:3]).clip(0.3)
         return np.stack([q[:, 0] / self.aspetto * 2, -q[:, 1] * 2,
                          np.clip(q[:, 2] / self.aspetto * 2, -0.98, 0.98)], axis=1)
 
@@ -699,6 +878,18 @@ class Ologramma:
         destra, giu, avanti, L = self._terna(P)
         dietro = -avanti
         bocca = (P[13] + P[14]) / 2
+
+        # la profondita' stimata e' il dato piu' rumoroso: la liscio un po' tra punti vicini,
+        # altrimenti le linee di livello tremano e si spezzano
+        for _ in range(2):
+            prof = P @ dietro
+            somma, quanti = np.zeros(478, np.float32), np.zeros(478, np.float32)
+            for a_, b_ in ((SPIGOLI[:, 0], SPIGOLI[:, 1]), (SPIGOLI[:, 1], SPIGOLI[:, 0])):
+                np.add.at(somma, a_, prof[b_])
+                np.add.at(quanti, a_, 1.0)
+            liscia = np.where(quanti > 0, somma / np.maximum(quanti, 1), prof)
+            P = P + dietro * ((liscia - prof) * 0.6)[:, None]
+        P0 = P
 
         # normali per vertice, orientate verso l'esterno della testa
         a, b, c = P[TRIANGOLI[:, 0]], P[TRIANGOLI[:, 1]], P[TRIANGOLI[:, 2]]
@@ -712,26 +903,15 @@ class Ologramma:
 
         # suddivisione con superficie arrotondata (Phong tessellation): ogni punto medio
         # viene spinto verso i piani tangenti dei due estremi, cosi' le linee non fanno spigoli
-        ia, ib = SPIGOLI[:, 0], SPIGOLI[:, 1]
-        medio = (P[ia] + P[ib]) / 2
-        su_a = medio - np.einsum("ij,ij->i", medio - P[ia], nv[ia])[:, None] * nv[ia]
-        su_b = medio - np.einsum("ij,ij->i", medio - P[ib], nv[ib])[:, None] * nv[ib]
-        medio += 0.75 * ((su_a + su_b) / 2 - medio)
-        n_medio = nv[ia] + nv[ib]
-        n_medio /= np.linalg.norm(n_medio, axis=1, keepdims=True) + 1e-9
-        P, nv = np.vstack([P, medio]), np.vstack([nv, n_medio])
-
-        # testa completa: anelli che proseguono oltre l'ovale e girano verso la nuca
-        base = P[ANELLO]
-        raggio = base - base.mean(axis=0)
-        raggio -= (raggio @ avanti)[:, None] * avanti
-        raggio /= np.linalg.norm(raggio, axis=1, keepdims=True) + 1e-9
-        in_alto = -(raggio @ giu)                                   # 1 in cima, -1 al mento
-        ampiezza = (1.0 + 1.1 * np.clip(in_alto, 0, 1) - 0.4 * np.clip(-in_alto, 0, 1))[:, None]
-        for r, arretra, peso in PROFILO:
-            P = np.vstack([P, base + raggio * (r * L) * ampiezza + dietro * (arretra * L)])
-            n = raggio * peso + avanti * (1.0 - peso)
-            nv = np.vstack([nv, n / (np.linalg.norm(n, axis=1, keepdims=True) + 1e-9)])
+        for spigoli in (SPIGOLI, SPIGOLI_2):
+            ia, ib = spigoli[:, 0], spigoli[:, 1]
+            medio = (P[ia] + P[ib]) / 2
+            su_a = medio - np.einsum("ij,ij->i", medio - P[ia], nv[ia])[:, None] * nv[ia]
+            su_b = medio - np.einsum("ij,ij->i", medio - P[ib], nv[ib])[:, None] * nv[ib]
+            medio += 0.75 * ((su_a + su_b) / 2 - medio)
+            n_medio = nv[ia] + nv[ib]
+            n_medio /= np.linalg.norm(n_medio, axis=1, keepdims=True) + 1e-9
+            P, nv = np.vstack([P, medio]), np.vstack([nv, n_medio])
 
         # campo su cui corrono le linee
         if self.motivo == "anelli":            # anelli attorno a occhi, bocca e centro della fronte
@@ -747,20 +927,23 @@ class Ologramma:
 
         ndc = self._proietta(P, t)
         self.b_mesh.write(np.hstack(
-            [ndc, campo[:, None], dist_bocca[:, None], nv]).astype("f4").tobytes())
+            [ndc, campo[:, None], dist_bocca[:, None], nv, DAL_BORDO[:, None]]
+        ).astype("f4").tobytes())
 
         # puntini: uno per ogni vertice
         z = ndc[:, 2]
         vicinanza = 1.0 - (z - z.min()) / (np.ptp(z) + 1e-6)
         lum = 0.25 + 0.75 * vicinanza
-        self.b_punti.write(np.hstack([ndc, lum[:, None], campo[:, None]]).astype("f4").tobytes())
+        lum = lum * (1.0 - self.sfumatura * (1.0 - np.clip(DAL_BORDO / 1.5, 0, 1) ** 2))
+        self.b_punti.write(np.hstack(
+            [ndc, lum[:, None], campo[:, None]])[:N_PUNTINI].astype("f4").tobytes())
 
         # tratti: ogni segmento diventa una striscia larga qualche pixel
-        w, h = self.dim
+        w, h = self.dim[0] * self.ss, self.dim[1] * self.ss        # pixel della scena
         A, B = ndc[SEGMENTI[:, 0]], ndc[SEGMENTI[:, 1]]
         d = (B[:, :2] - A[:, :2]) * (w / 2, h / 2)
         perp = np.stack([-d[:, 1], d[:, 0]], 1) / (np.linalg.norm(d, axis=1, keepdims=True) + 1e-6)
-        mezza = max(1.5, 0.008 * L * self.zoom * h)                 # mezza larghezza in pixel
+        mezza = max(1.5 * self.ss, 0.006 * L * h)                   # mezza larghezza in pixel
         scarto = np.hstack([perp * mezza / (w / 2, h / 2), np.zeros((len(A), 1))])
         vert = lambda Q, lato: np.hstack([Q + scarto * lato, np.full((len(Q), 1), lato)])
         strisce = np.stack([vert(A, -1), vert(A, 1), vert(B, -1),
@@ -778,7 +961,76 @@ class Ologramma:
         self.b_iridi.write(dati.tobytes())
 
         self._prepara_bocca(P0, destra, giu, dietro, L, bocca, t)
-        return len(ndc), L, float(campo.max()), pieno
+        if self.ali > 0.01:
+            self._prepara_ali(P0, destra, giu, dietro, L, t)
+        if self.corna > 0.01:
+            campo_corna = self._prepara_corna(P0, nv, campo, destra, giu, avanti, L, bocca, t)
+            return N_PUNTINI, L, max(float(campo.max()), campo_corna), pieno
+        return N_PUNTINI, L, float(campo.max()), pieno
+
+    def _prepara_ali(self, P, destra, giu, dietro, L, t):
+        """Due grandi rettangoli dietro la testa: la forma dell'ala la disegna lo shader."""
+        # le ali stanno sulla schiena, non sulla faccia: seguono la testa solo in parte
+        # quando ruoti, altrimenti girando di lato ti finirebbero davanti
+        misto = lambda v, asse: (0.3 * v + 0.7 * np.float32(asse)) / np.linalg.norm(
+            0.3 * v + 0.7 * np.float32(asse))
+        destra, giu, dietro = misto(destra, (1, 0, 0)), misto(giu, (0, 1, 0)), misto(dietro, (0, 0, 1))
+        su = -giu
+        # si aprono con rabbia, bocca aperta e voce; altrimenti battono piano, un po' raccolte
+        apertura = max(self.rabbia, 0.6 * self.energia, 0.5 * self.voce)
+        angolo = 0.38 + 0.16 * np.sin(t * 1.4) - 0.34 * apertura
+        attacco = (P[10] + P[152]) / 2 + dietro * (0.55 * L) + giu * (0.35 * L)
+        misura = self.ali * L
+        vertici = []
+        for lato in (-1.0, 1.0):
+            fuori = (destra * lato) * np.cos(angolo) + dietro * np.sin(angolo)
+            origine = attacco + destra * (lato * 0.10 * L)
+            for u, v in ((0, 0), (1, 0), (0, 1), (0, 1), (1, 0), (1, 1)):
+                Q = origine + fuori * (u * 1.9 * misura) + su * ((v - 0.41) * 2.2 * misura)
+                vertici.append(np.hstack([Q, [u, v, 0.0, 0.0]]))
+        dati = np.array(vertici, np.float32)
+        dati[:, :3] = self._proietta(dati[:, :3], t)
+        dati[:, 2] = 0.9999               # in fondo a tutto: volto, corna e bocca le coprono
+        self.b_ali.write(dati.tobytes())
+
+    def _prepara_corna(self, P, nv, campo, destra, giu, avanti, L, bocca, t):
+        """Due corna da maschera oni: partono dalla fronte, vanno in avanti e curvano in alto."""
+        su = -giu
+        s = np.linspace(0.0, 1.0, CORNA_SEZIONI + 1, dtype=np.float32)[:, None]
+        angolo = np.linspace(0.0, 2 * np.pi, CORNA_LATI, endpoint=False, dtype=np.float32)
+        lung = self.corna * L * 0.62            # a 1.0 sono corte e tozze, da oni
+        vertici, campo_max = [], 0.0
+        for attacco in CORNA_ATTACCHI:
+            lato = np.sign((P[attacco] - P[10]) @ destra) or 1.0        # verso l'esterno del volto
+            fuori = destra * lato
+            base = P[attacco] - nv[attacco] * (0.03 * L)                # un po' dentro la fronte
+            # curva di Bezier: esce in avanti, poi sale e si apre appena
+            p1 = base + (avanti * 0.26 + su * 0.16 + fuori * 0.06) * lung
+            p2 = base + (avanti * 0.14 + su * 0.56 + fuori * 0.16) * lung
+            asse = (1 - s) ** 2 * base + 2 * s * (1 - s) * p1 + s ** 2 * p2
+            tang = 2 * (1 - s) * (p1 - base) + 2 * s * (p2 - p1)
+            tang /= np.linalg.norm(tang, axis=1, keepdims=True) + 1e-9
+            n1 = np.cross(tang, destra)
+            n1 /= np.linalg.norm(n1, axis=1, keepdims=True) + 1e-9
+            n2 = np.cross(tang, n1)
+            raggio = 0.095 * L * (0.35 + 0.65 * min(self.corna, 1.0)) * (1.0 - s) ** 0.8
+            # ogni anello: un cerchio attorno all'asse, sempre piu' stretto verso la punta
+            giro = (np.cos(angolo)[None, :, None] * n1[:, None, :]
+                    + np.sin(angolo)[None, :, None] * n2[:, None, :])    # (sezioni, lati, 3)
+            punti = asse[:, None, :] + giro * raggio[:, None, :]
+            # le linee proseguono dalla fronte e diventano anelli attorno al corno
+            c = campo[attacco] + s * 0.30 * self.corna
+            campo_max = max(campo_max, float(c.max()))
+            Q = punti.reshape(-1, 3)
+            dati = np.hstack([
+                self._proietta(Q, t),
+                np.repeat(c, CORNA_LATI, axis=0),
+                (np.linalg.norm(Q - bocca, axis=1) / L)[:, None],
+                giro.reshape(-1, 3),
+                np.full((len(Q), 1), 5.0, np.float32)])                 # mai sfumate
+            vertici.append(dati)
+        self.b_corna.write(np.vstack(vertici).astype("f4").tobytes())
+        return campo_max
 
     def _prepara_bocca(self, P, destra, giu, dietro, L, bocca, t):
         """Denti e fondo della bocca: si vedono solo attraverso l'apertura delle labbra."""
@@ -831,6 +1083,9 @@ class Ologramma:
                                                                 (moderngl.ONE, moderngl.ONE)))
         if self.pos is not None and self.presenza > 0.001:
             n_punti, L, campo_max, pieno = self._prepara(t)
+            # spessori, bagliore e sfasamento dei colori sono proporzionati al volto:
+            # quando e' piccolo nell'inquadratura non devono impastarlo
+            self.rapporto = float(np.clip(L / 0.45, 0.4, 1.3))
             # materializzazione: il fronte avanza lungo il campo, dal naso verso l'esterno
             p = self.presenza
             rivela = 1e9 if p >= 1.0 else (p * p * (3 - 2 * p)) * (campo_max * 1.08 + 0.05)
@@ -839,14 +1094,16 @@ class Ologramma:
             ctx.disable(moderngl.BLEND)
             # la mesh si disegna sempre (nasconde cio' che sta dietro); le linee solo se servono
             imposta(self.p_mesh, colore=colore, n_linee=float(self.n_linee), fase=self.fase,
-                    spessore=self.spessore, energia=self.energia, tempo=tempo,
+                    spessore=self.spessore * self.ss * self.rapporto ** 0.6, energia=self.energia, tempo=tempo,
                     y_fascio=1.3 - (t * 0.45 % 1.0) * 2.6, rivela=float(rivela),
                     in_formazione=0.0 if p >= 1.0 else 1.0, voce=self.voce,
+                    sfumatura=self.sfumatura,
                     tremolio=self.rabbia, mostra_linee=0.0 if self.stile == "puntini" else 1.0)
             if "impulsi" in self.p_mesh:
                 self.p_mesh["impulsi"].write(self.impulsi.astype("f4").tobytes())
-            n_tri = len(TRI_FINI) + (len(TRI_TESTA) if self.testa else 0)
-            self.v_mesh.render(moderngl.TRIANGLES, vertices=n_tri * 3)
+            self.v_mesh.render(moderngl.TRIANGLES)
+            if self.corna > 0.01:
+                self.v_corna.render(moderngl.TRIANGLES)
 
             if pieno > 0:                  # compaiono solo nel buco della bocca
                 imposta(self.p_gola, colore=colore, forza=pieno, tempo=tempo)
@@ -854,6 +1111,17 @@ class Ologramma:
                 if self.denti:
                     imposta(self.p_denti, colore=colore, forza=pieno)
                     self.v_denti.render(moderngl.TRIANGLES)
+
+            if self.ali > 0.01 and pieno > 0:   # dietro a tutto, fatte di caratteri
+                additivo()
+                ctx.depth_mask = False
+                alt_cella = max(8.0, h * self.ss / ALI_RIGHE)
+                self.t_glifi.use(0)
+                imposta(self.p_ali, atlante=0, colore=colore, tempo=tempo, forza=0.55 * pieno,
+                        cella=(alt_cella * 0.62, alt_cella), n_glifi=float(len(GLIFI)))
+                self.v_ali.render(moderngl.TRIANGLES, vertices=12)
+                ctx.depth_mask = True
+                ctx.disable(moderngl.BLEND)
 
             additivo()
             ctx.depth_mask = False
@@ -865,9 +1133,8 @@ class Ologramma:
                 self.v_tratti.render(moderngl.TRIANGLES, vertices=len(SEGMENTI) * 6)
             if self.stile != "linee":
                 imposta(self.p_punti, colore=colore, rivela=float(rivela),
-                        scala=L * w / self.aspetto / 75.0 * (1.0 + 0.5 * self.energia))
-                self.v_punti.render(moderngl.POINTS,
-                                    vertices=n_punti if self.testa else N_VERTICI)
+                        scala=L * w * self.ss / self.aspetto / 75.0 * (1.0 + 0.5 * self.energia))
+                self.v_punti.render(moderngl.POINTS, vertices=n_punti)
             ctx.depth_mask = True
 
         ctx.disable(moderngl.DEPTH_TEST)
@@ -879,33 +1146,31 @@ class Ologramma:
         f_nuova.use()
         self.t_scena.use(0)
         t_vecchia.use(1)
-        imposta(self.p_scia, nuovo=0, vecchio=1, tenuta=SCIA ** (dt * 30.0))
+        imposta(self.p_scia, nuovo=0, vecchio=1, tenuta=self.scia ** (dt * 30.0))
         self.q_scia.render(moderngl.TRIANGLES)
 
-        # ---- 3) alone su due scale (sfocatura separabile a bassa risoluzione)
-        def sfoca(coppia, sorgente, giri):
-            (fa, ta), (fb, tb) = coppia
+        # ---- 3) bagliore: ogni livello sfoca il precedente a meta' risoluzione
+        self._aloni, sorgente = [], t_nuova
+        for (fa, ta), (fb, tb) in self.aloni:
             dim = ta.size
-            for i in range(giri):
-                fa.use()
-                (sorgente if i == 0 else tb).use(0)
-                imposta(self.p_sfoca, tex=0, passo=(1.0 / dim[0], 0.0))
-                self.q_sfoca.render(moderngl.TRIANGLES)
-                fb.use()
-                ta.use(0)
-                imposta(self.p_sfoca, tex=0, passo=(0.0, 1.0 / dim[1]))
-                self.q_sfoca.render(moderngl.TRIANGLES)
-            return tb
-
-        self._alone1 = sfoca(self.alone1, t_nuova, 1)
-        self._alone2 = sfoca(self.alone2, self._alone1, 2)
+            fa.use()
+            sorgente.use(0)
+            imposta(self.p_sfoca, tex=0, passo=(1.0 / dim[0], 0.0))
+            self.q_sfoca.render(moderngl.TRIANGLES)
+            fb.use()
+            ta.use(0)
+            imposta(self.p_sfoca, tex=0, passo=(0.0, 1.0 / dim[1]))
+            self.q_sfoca.render(moderngl.TRIANGLES)
+            self._aloni.append(tb)
+            sorgente = tb
         self._scena_finale = t_nuova
         self._uniformi_finali = dict(
-            scena=0, alone1=1, alone2=2, webcam=3, t=t % 100.0, seme=float(rng.random()),
+            scena=0, a0=1, a1=2, a2=3, a3=4, a4=5, a5=6, webcam=7, t=t % 100.0, seme=float(rng.random()),
             glitch=((0.02 + 0.25 * self.energia + 0.2 * self.rabbia) * rng.random()
                     if self.glitch else 0.0),
             energia=self.energia, lampo=self.lampo, colpo=self.colpo,
-            bagliore=self.bagliore * (1.0 + 0.3 * self.energia + 0.2 * self.voce),
+            bagliore=self.bagliore * self.rapporto ** 0.5 * (1.0 + 0.3 * self.energia + 0.2 * self.voce),
+            rapporto=self.rapporto, luce_sfondo=self.luce_sfondo,
             sfondo=1.0 if (self.sfondo and self.t_webcam is not None) else 0.0,
             dimensione=(float(w), float(h)))
 
@@ -914,12 +1179,114 @@ class Ologramma:
         bersaglio.use()
         self.ctx.viewport = viewport
         self._scena_finale.use(0)
-        self._alone1.use(1)
-        self._alone2.use(2)
+        for i in range(6):                 # lo shader ne legge sei: se sono meno, ripeto l'ultimo
+            self._aloni[min(i, len(self._aloni) - 1)].use(1 + i)
         if self.t_webcam is not None:
-            self.t_webcam.use(3)
+            self.t_webcam.use(7)
         imposta(self.p_finale, **self._uniformi_finali)
         self.q_finale.render(moderngl.TRIANGLES)
+
+
+class Pannello:
+    """Pannello a schermo con i cursori. Si disegna con OpenCV e si mostra come texture."""
+
+    LARG, RIGA, MARG, TESTA = 330, 42, 16, 46
+
+    def __init__(self, ctx, olo):
+        self.ctx, self.olo = ctx, olo
+        self.visibile = False
+        self.alt = self.TESTA + len(CURSORI) * self.RIGA + 34
+        self.tex = ctx.texture((self.LARG, self.alt), 4, dtype="f1")
+        self.tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self.prog = ctx.program(vertex_shader=VS_PANNELLO, fragment_shader=FS_PANNELLO)
+        self.buf = ctx.buffer(reserve=6 * 4 * 4, dynamic=True)
+        self.vao = ctx.vertex_array(self.prog, [(self.buf, "2f 2f", "in_pos", "in_uv")])
+        self._disegnati = None
+
+    def immagine(self):
+        """Il pannello come immagine RGBA."""
+        img = np.zeros((self.alt, self.LARG, 4), np.uint8)
+        img[:] = (12, 16, 20, 215)
+        chiaro, tenue = (235, 240, 245, 255), (130, 140, 150, 255)
+        accento = tuple(int(v * 255) for v in
+                        colorsys.hsv_to_rgb(self.olo.tinta, self.olo.saturazione, 1.0)) + (255,)
+        scrivi = lambda testo, x, y, colore, scala=0.5: cv2.putText(
+            img, testo, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scala, colore, 1, cv2.LINE_AA)
+        scrivi("IMPOSTAZIONI", self.MARG, 28, chiaro, 0.55)
+        x0, x1 = self.MARG, self.LARG - self.MARG
+        for i, (etichetta, attributo, minimo, massimo) in enumerate(CURSORI):
+            y = self.TESTA + i * self.RIGA
+            valore = float(getattr(self.olo, attributo))
+            scrivi(etichetta, x0, y + 14, chiaro)
+            scrivi(f"{valore:.2f}", x1 - 44, y + 14, tenue)
+            xv = int(x0 + (x1 - x0) * np.clip((valore - minimo) / (massimo - minimo), 0, 1))
+            cv2.line(img, (x0, y + 27), (x1, y + 27), (60, 68, 76, 255), 3, cv2.LINE_AA)
+            cv2.line(img, (x0, y + 27), (xv, y + 27), accento, 3, cv2.LINE_AA)
+            cv2.circle(img, (xv, y + 27), 7, chiaro, -1, cv2.LINE_AA)
+        scrivi("TAB chiude - 1-4 preset - P colore", x0, self.alt - 14, tenue, 0.42)
+        return img
+
+    def mouse(self, x, y, premuto, scala):
+        """x, y in pixel della finestra (origine in alto a sinistra). Vero se il clic e' suo."""
+        x, y = x / scala - 12, y / scala - 12                     # coordinate dentro il pannello
+        if not (self.visibile and premuto and 0 <= x < self.LARG and 0 <= y < self.alt):
+            return False
+        i = int((y - self.TESTA) // self.RIGA)
+        if 0 <= i < len(CURSORI):
+            _, attributo, minimo, massimo = CURSORI[i]
+            frazione = np.clip((x - self.MARG) / (self.LARG - 2 * self.MARG), 0.0, 1.0)
+            setattr(self.olo, attributo, float(minimo + frazione * (massimo - minimo)))
+        return True
+
+    def disegna(self, fb_w, fb_h, scala):
+        if not self.visibile:
+            return
+        valori = tuple(round(float(getattr(self.olo, c[1])), 3) for c in CURSORI)
+        if valori != self._disegnati:                             # ridisegno solo se cambia qualcosa
+            self._disegnati = valori
+            self.tex.write(self.immagine().tobytes())
+        # rettangolo in alto a sinistra, 12 pixel dal bordo
+        x0, y0 = 12 * scala, 12 * scala
+        x1, y1 = x0 + self.LARG * scala, y0 + self.alt * scala
+        n = lambda x, y: (x / fb_w * 2 - 1, 1 - y / fb_h * 2)
+        quad = [*n(x0, y0), 0, 0, *n(x1, y0), 1, 0, *n(x0, y1), 0, 1,
+                *n(x0, y1), 0, 1, *n(x1, y0), 1, 0, *n(x1, y1), 1, 1]
+        self.buf.write(np.array(quad, "f4").tobytes())
+        self.ctx.viewport = (0, 0, fb_w, fb_h)
+        self.ctx.enable(moderngl.BLEND)
+        self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
+        self.tex.use(0)
+        imposta(self.prog, tex=0)
+        self.vao.render(moderngl.TRIANGLES)
+        self.ctx.disable(moderngl.BLEND)
+
+
+def carica_impostazioni(olo, percorso=FILE_IMPOSTAZIONI):
+    """Rilegge le impostazioni salvate, ignorando valori mancanti o non validi."""
+    try:
+        with open(percorso, encoding="utf-8") as f:
+            dati = json.load(f)
+    except (OSError, ValueError):
+        return
+    limiti = {c[1]: c[2:] for c in CURSORI}
+    for nome in DA_SALVARE:
+        if nome not in dati:
+            continue
+        valore = dati[nome]
+        if nome in limiti and isinstance(valore, (int, float)):
+            setattr(olo, nome, float(np.clip(valore, *limiti[nome])))
+        elif nome == "stile" and valore in STILI or nome == "motivo" and valore in MOTIVI:
+            setattr(olo, nome, valore)
+        elif isinstance(valore, bool) and isinstance(getattr(olo, nome), bool):
+            setattr(olo, nome, valore)
+
+
+def salva_impostazioni(olo, percorso=FILE_IMPOSTAZIONI):
+    try:
+        with open(percorso, "w", encoding="utf-8") as f:
+            json.dump({nome: getattr(olo, nome) for nome in DA_SALVARE}, f, indent=2)
+    except OSError as errore:
+        print("Impostazioni non salvate:", errore)
 
 
 # ================================================================ ingressi
@@ -1068,6 +1435,8 @@ def main():
     ctx.enable(moderngl.PROGRAM_POINT_SIZE)
     print(f"GPU: {ctx.info['GL_RENDERER']} - rendering a {larghezza}x{altezza}")
     olo = Ologramma(ctx, larghezza, altezza)
+    carica_impostazioni(olo)
+    pannello = Pannello(ctx, olo)
     microfono = Microfono()
 
     virtuale = None
@@ -1078,7 +1447,7 @@ def main():
 
     stato = dict(selettore=False, adatta=True, screenshot=False, video=None, intero=None)
     alterna = {glfw.KEY_O: "iridi", glfw.KEY_D: "denti", glfw.KEY_T: "tratti",
-               glfw.KEY_H: "testa", glfw.KEY_G: "glitch", glfw.KEY_B: "sfondo"}
+               glfw.KEY_G: "glitch", glfw.KEY_B: "sfondo"}
     prossimo = lambda elenco, attuale: elenco[(elenco.index(attuale) + 1) % len(elenco)]
 
     def tasto(_finestra, codice, _scan, azione, _mod):
@@ -1094,10 +1463,22 @@ def main():
             return
         if codice in (glfw.KEY_Q, glfw.KEY_ESCAPE):
             glfw.set_window_should_close(finestra, True)
+        elif codice == glfw.KEY_TAB:
+            pannello.visibile = not pannello.visibile
         elif glfw.KEY_1 <= codice <= glfw.KEY_4:
             print("Preset:", olo.preset(codice - glfw.KEY_0))
         elif codice in alterna:
             setattr(olo, alterna[codice], not getattr(olo, alterna[codice]))
+        elif codice == glfw.KEY_K:                                # corna: spegne e riaccende
+            if olo.corna > 0.01:
+                olo._corna_prima, olo.corna = olo.corna, 0.0
+            else:
+                olo.corna = olo._corna_prima or 1.0
+        elif codice == glfw.KEY_A:                                # ali: spegne e riaccende
+            if olo.ali > 0.01:
+                olo._ali_prima, olo.ali = olo.ali, 0.0
+            else:
+                olo.ali = olo._ali_prima or 1.0
         elif codice == glfw.KEY_M:
             olo.stile = prossimo(STILI, olo.stile)
         elif codice == glfw.KEY_L:
@@ -1182,6 +1563,14 @@ def main():
         ctx.viewport = (0, 0, fb_w, fb_h)
         ctx.screen.clear(0, 0, 0, 1)
         olo.componi(ctx.screen, ((fb_w - vw) // 2, (fb_h - vh) // 2, vw, vh))
+
+        # pannello: sopra a tutto, solo sulla finestra (non finisce in video e screenshot)
+        dpi = fb_w / max(1, glfw.get_window_size(finestra)[0])    # schermi ad alta densita'
+        scala_ui = dpi * max(1.0, fb_h / dpi / 1080)              # piu' grande sui monitor grandi
+        mx, my = glfw.get_cursor_pos(finestra)
+        premuto = glfw.get_mouse_button(finestra, glfw.MOUSE_BUTTON_LEFT) == glfw.PRESS
+        pannello.mouse(mx * dpi, my * dpi, premuto, scala_ui)
+        pannello.disegna(fb_w, fb_h, scala_ui)
         glfw.swap_buffers(finestra)
 
         # uscite facoltative: screenshot, video (30 fotogrammi al secondo), webcam virtuale
@@ -1199,6 +1588,7 @@ def main():
             if virtuale:
                 virtuale.send(immagine[:, :, ::-1])
 
+    salva_impostazioni(olo)
     tracciatore.attivo = False
     tracciatore.join(timeout=1.0)
     if stato["video"] is not None:

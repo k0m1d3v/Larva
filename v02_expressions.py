@@ -5,7 +5,7 @@ Installazione:
     pip install mediapipe opencv-python numpy
 
 Avvio:
-    python maschera.py
+    python v02_expressions.py
 
 Tasti:
     m  cambia stile (ologramma / puntini / linee)

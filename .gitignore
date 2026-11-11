@@ -30,5 +30,10 @@ maschera_*.mp4
 # Local user settings
 maschera_impostazioni.json
 
+# Excluded versions (duplicates and the samurai-armor experiment)
+AddT-shirt fix.py
+JumpInHistory.py
+JumpInHistory #.py
+
 # Private notes
 Idee=TrovareUnNomee.txt

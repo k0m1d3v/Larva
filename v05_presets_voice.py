@@ -1,5 +1,5 @@
 """
-Maschera olografica in tempo reale dalla webcam (v7, rendering su GPU).
+Maschera olografica in tempo reale dalla webcam (v6, rendering su GPU).
 
 Installazione:
     pip install mediapipe opencv-python numpy moderngl glfw
@@ -7,13 +7,12 @@ Installazione:
     pip install pyvirtualcam        (facoltativo: webcam virtuale)
 
 Avvio:
-    python maschera.py              finestra normale
-    python maschera.py --virtuale   in piu' manda l'immagine a una webcam virtuale
+    python v05_presets_voice.py              finestra normale
+    python v05_presets_voice.py --virtuale   in piu' manda l'immagine a una webcam virtuale
                                     (Windows/macOS: serve OBS installato;
                                      Linux: serve il modulo v4l2loopback)
 
 Tasti:
-    TAB  pannello con i cursori (linee, bagliore, scia, prospettiva, colore...)
     1-4  preset: ciano, rosso allarme, oro, bianco e nero
     l    motivo delle linee: curve di livello / anelli attorno a occhi e bocca / scansione
     m    stile: ologramma / solo puntini / solo linee
@@ -27,9 +26,6 @@ Tasti:
     s    salva uno screenshot (PNG)       r  avvia/ferma la registrazione video (MP4)
     q    esci
 
-Le impostazioni vengono salvate in maschera_impostazioni.json alla chiusura
-e ricaricate all'avvio (cancella il file per tornare ai valori iniziali).
-
 Reazioni:
     voce                    -> un'onda di luce parte dalla bocca a ogni sillaba
     sopracciglia aggrottate -> la maschera diventa rossa e trema
@@ -40,7 +36,6 @@ Reazioni:
 """
 
 import colorsys
-import json
 import os
 import sys
 import threading
@@ -57,10 +52,8 @@ from mediapipe.tasks.python import vision
 # ---------------------------------------------------------------- parametri
 CAMERA = 0            # indice della webcam
 ALTEZZA = 0           # risoluzione verticale del rendering; 0 = quella del monitor (max 1080)
-SOVRACAMPIONA = 2     # la scena e' disegnata a risoluzione x2 e poi ridotta (1 = spento)
-N_ALONI = 6           # scale del bagliore: piu' sono, piu' l'alone e' largo e morbido
 GRANDEZZA = 0.60      # con 'z' attivo: altezza del volto rispetto alla finestra
-PROSPETTIVA = 0.9     # valore iniziale. 0 = proiezione piatta; piu' alto = piu' profondita'
+PROSPETTIVA = 0.9     # 0 = proiezione piatta; piu' alto = piu' profondita'
 OSCILLAZIONE = 0.10   # ampiezza (radianti) del dondolio della camera virtuale
 SCIA = 0.80           # persistenza della scia (0 = nessuna, 0.95 = lunghissima)
 MODELLO = "face_landmarker.task"
@@ -68,8 +61,6 @@ URL_MODELLO = (
     "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
     "face_landmarker/float16/1/face_landmarker.task"
 )
-FILE_IMPOSTAZIONI = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 "maschera_impostazioni.json")
 STILI = ["ologramma", "puntini", "linee"]
 MOTIVI = ["livello", "anelli", "scansione"]
 #          nome             tinta  satur.  linee  bagliore  spessore
@@ -154,20 +145,6 @@ SEGMENTI = np.array(
     np.int32)
 COLONNE_DENTI = 33    # suddivisioni di ogni arcata di denti
 N_IMPULSI = 6         # onde della voce visibili contemporaneamente
-# cursori del pannello: (etichetta, attributo di Ologramma, minimo, massimo)
-CURSORI = [
-    ("Linee", "n_linee", 8.0, 60.0),
-    ("Spessore", "spessore", 0.6, 3.0),
-    ("Bagliore", "bagliore", 0.0, 2.5),
-    ("Scia", "scia", 0.0, 0.95),
-    ("Prospettiva", "prospettiva", 0.0, 1.6),
-    ("Dondolio", "oscillazione", 0.0, 0.30),
-    ("Grandezza", "grandezza", 0.30, 0.90),
-    ("Tinta", "tinta", 0.0, 1.0),
-    ("Saturazione", "saturazione", 0.0, 1.0),
-]
-DA_SALVARE = [c[1] for c in CURSORI] + ["stile", "motivo", "iridi", "denti", "tratti", "testa",
-                                         "glitch"]
 rng = np.random.default_rng()
 
 
@@ -436,30 +413,9 @@ void main() {
 }
 """
 
-VS_PANNELLO = """
-#version 330
-in vec2 in_pos;
-in vec2 in_uv;
-out vec2 uv;
-void main() {
-    gl_Position = vec4(in_pos, 0.0, 1.0);
-    uv = in_uv;
-}
-"""
-
-FS_PANNELLO = """
-#version 330
-uniform sampler2D tex;
-in vec2 uv;
-out vec4 f;
-void main() {
-    f = texture(tex, uv);
-}
-"""
-
 FS_FINALE = """
 #version 330
-uniform sampler2D scena, a0, a1, a2, a3, a4, a5, webcam;
+uniform sampler2D scena, alone1, alone2, webcam;
 uniform float t, seme, glitch, energia, sfondo, bagliore, lampo, colpo;
 uniform vec2 dimensione;
 in vec2 uv;
@@ -468,9 +424,8 @@ out vec4 f;
 float caso(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
 
 vec3 luce(vec2 p) {
-    vec3 alone = 0.30 * texture(a0, p).rgb + 0.30 * texture(a1, p).rgb + 0.28 * texture(a2, p).rgb
-               + 0.26 * texture(a3, p).rgb + 0.24 * texture(a4, p).rgb + 0.22 * texture(a5, p).rgb;
-    return texture(scena, p).rgb + bagliore * alone;
+    return texture(scena, p).rgb
+         + bagliore * (0.55 * texture(alone1, p).rgb + 0.95 * texture(alone2, p).rgb);
 }
 
 void main() {
@@ -526,7 +481,6 @@ class Ologramma:
     def __init__(self, ctx, larghezza, altezza):
         self.ctx = ctx
         self.dim = (larghezza, altezza)
-        self.ss = max(1, int(SOVRACAMPIONA))         # fattore di sovracampionamento della scena
         self.aspetto = larghezza / altezza
         self.centro_schermo = np.array([self.aspetto / 2, 0.5, 0.0], np.float32)
 
@@ -535,8 +489,6 @@ class Ologramma:
         self.glitch, self.sfondo = True, False
         self.iridi = self.denti = self.tratti = self.testa = True
         self.adatta = True                # volto centrato, ingrandito e in prospettiva
-        self.grandezza, self.prospettiva = GRANDEZZA, PROSPETTIVA
-        self.oscillazione, self.scia = OSCILLAZIONE, SCIA
         self.preset(1)
 
         # ---- stato
@@ -606,14 +558,12 @@ class Ologramma:
             dep = ctx.depth_renderbuffer(dim) if profondita else None
             return ctx.framebuffer([tex], dep), tex
 
-        # la scena e' piu' grande dello schermo: ridurla dopo ammorbidisce bordi e puntini
-        self.f_scena, self.t_scena = bersaglio((larghezza * self.ss, altezza * self.ss), True)
+        self.f_scena, self.t_scena = bersaglio(self.dim, True)
         self.scie = [bersaglio(self.dim), bersaglio(self.dim)]
-        # piramide del bagliore: ogni livello e' la meta' del precedente
-        self.aloni = []
-        for i in range(1, N_ALONI + 1):
-            dim = (max(2, larghezza >> i), max(2, altezza >> i))
-            self.aloni.append([bersaglio(dim), bersaglio(dim)])
+        meta = (larghezza // 2, altezza // 2)
+        ottavo = (larghezza // 8, altezza // 8)
+        self.alone1 = [bersaglio(meta), bersaglio(meta)]
+        self.alone2 = [bersaglio(ottavo), bersaglio(ottavo)]
         self.f_uscita = ctx.framebuffer([ctx.texture(self.dim, 3)])   # per video e screenshot
         self.t_webcam = None
 
@@ -690,7 +640,7 @@ class Ologramma:
         if self.adatta:
             alto, basso = self._unita(self.pos[10]), self._unita(self.pos[152])
             centro = (alto + basso) / 2
-            zoom = self.grandezza / (np.linalg.norm(alto - basso) + 1e-6)
+            zoom = GRANDEZZA / (np.linalg.norm(alto - basso) + 1e-6)
         else:
             centro, zoom = self.centro_schermo, 1.0
         self.centro += k * (centro - self.centro)
@@ -731,13 +681,13 @@ class Ologramma:
         """Camera virtuale: leggero dondolio e prospettiva, poi coordinate dello schermo."""
         q = np.asarray(Q, np.float32) - self.centro_schermo
         if self.spazio > 1e-3:
-            imb = self.oscillazione * self.spazio * np.sin(t * 0.50)
-            bec = self.oscillazione * 0.5 * self.spazio * np.sin(t * 0.37 + 1.0)
+            imb = OSCILLAZIONE * self.spazio * np.sin(t * 0.50)
+            bec = OSCILLAZIONE * 0.5 * self.spazio * np.sin(t * 0.37 + 1.0)
             c, s = np.cos(imb), np.sin(imb)
             q = np.stack([q[:, 0] * c + q[:, 2] * s, q[:, 1], -q[:, 0] * s + q[:, 2] * c], 1)
             c, s = np.cos(bec), np.sin(bec)
             q = np.stack([q[:, 0], q[:, 1] * c - q[:, 2] * s, q[:, 1] * s + q[:, 2] * c], 1)
-            q[:, :2] /= (1.0 + self.prospettiva * self.spazio * q[:, 2:3]).clip(0.3)
+            q[:, :2] /= (1.0 + PROSPETTIVA * self.spazio * q[:, 2:3]).clip(0.3)
         return np.stack([q[:, 0] / self.aspetto * 2, -q[:, 1] * 2,
                          np.clip(q[:, 2] / self.aspetto * 2, -0.98, 0.98)], axis=1)
 
@@ -806,11 +756,11 @@ class Ologramma:
         self.b_punti.write(np.hstack([ndc, lum[:, None], campo[:, None]]).astype("f4").tobytes())
 
         # tratti: ogni segmento diventa una striscia larga qualche pixel
-        w, h = self.dim[0] * self.ss, self.dim[1] * self.ss        # pixel della scena
+        w, h = self.dim
         A, B = ndc[SEGMENTI[:, 0]], ndc[SEGMENTI[:, 1]]
         d = (B[:, :2] - A[:, :2]) * (w / 2, h / 2)
         perp = np.stack([-d[:, 1], d[:, 0]], 1) / (np.linalg.norm(d, axis=1, keepdims=True) + 1e-6)
-        mezza = max(1.5 * self.ss, 0.006 * L * h)                   # mezza larghezza in pixel
+        mezza = max(1.5, 0.008 * L * self.zoom * h)                 # mezza larghezza in pixel
         scarto = np.hstack([perp * mezza / (w / 2, h / 2), np.zeros((len(A), 1))])
         vert = lambda Q, lato: np.hstack([Q + scarto * lato, np.full((len(Q), 1), lato)])
         strisce = np.stack([vert(A, -1), vert(A, 1), vert(B, -1),
@@ -889,7 +839,7 @@ class Ologramma:
             ctx.disable(moderngl.BLEND)
             # la mesh si disegna sempre (nasconde cio' che sta dietro); le linee solo se servono
             imposta(self.p_mesh, colore=colore, n_linee=float(self.n_linee), fase=self.fase,
-                    spessore=self.spessore * self.ss, energia=self.energia, tempo=tempo,
+                    spessore=self.spessore, energia=self.energia, tempo=tempo,
                     y_fascio=1.3 - (t * 0.45 % 1.0) * 2.6, rivela=float(rivela),
                     in_formazione=0.0 if p >= 1.0 else 1.0, voce=self.voce,
                     tremolio=self.rabbia, mostra_linee=0.0 if self.stile == "puntini" else 1.0)
@@ -915,7 +865,7 @@ class Ologramma:
                 self.v_tratti.render(moderngl.TRIANGLES, vertices=len(SEGMENTI) * 6)
             if self.stile != "linee":
                 imposta(self.p_punti, colore=colore, rivela=float(rivela),
-                        scala=L * w * self.ss / self.aspetto / 75.0 * (1.0 + 0.5 * self.energia))
+                        scala=L * w / self.aspetto / 75.0 * (1.0 + 0.5 * self.energia))
                 self.v_punti.render(moderngl.POINTS,
                                     vertices=n_punti if self.testa else N_VERTICI)
             ctx.depth_mask = True
@@ -929,26 +879,29 @@ class Ologramma:
         f_nuova.use()
         self.t_scena.use(0)
         t_vecchia.use(1)
-        imposta(self.p_scia, nuovo=0, vecchio=1, tenuta=self.scia ** (dt * 30.0))
+        imposta(self.p_scia, nuovo=0, vecchio=1, tenuta=SCIA ** (dt * 30.0))
         self.q_scia.render(moderngl.TRIANGLES)
 
-        # ---- 3) bagliore: ogni livello sfoca il precedente a meta' risoluzione
-        self._aloni, sorgente = [], t_nuova
-        for (fa, ta), (fb, tb) in self.aloni:
+        # ---- 3) alone su due scale (sfocatura separabile a bassa risoluzione)
+        def sfoca(coppia, sorgente, giri):
+            (fa, ta), (fb, tb) = coppia
             dim = ta.size
-            fa.use()
-            sorgente.use(0)
-            imposta(self.p_sfoca, tex=0, passo=(1.0 / dim[0], 0.0))
-            self.q_sfoca.render(moderngl.TRIANGLES)
-            fb.use()
-            ta.use(0)
-            imposta(self.p_sfoca, tex=0, passo=(0.0, 1.0 / dim[1]))
-            self.q_sfoca.render(moderngl.TRIANGLES)
-            self._aloni.append(tb)
-            sorgente = tb
+            for i in range(giri):
+                fa.use()
+                (sorgente if i == 0 else tb).use(0)
+                imposta(self.p_sfoca, tex=0, passo=(1.0 / dim[0], 0.0))
+                self.q_sfoca.render(moderngl.TRIANGLES)
+                fb.use()
+                ta.use(0)
+                imposta(self.p_sfoca, tex=0, passo=(0.0, 1.0 / dim[1]))
+                self.q_sfoca.render(moderngl.TRIANGLES)
+            return tb
+
+        self._alone1 = sfoca(self.alone1, t_nuova, 1)
+        self._alone2 = sfoca(self.alone2, self._alone1, 2)
         self._scena_finale = t_nuova
         self._uniformi_finali = dict(
-            scena=0, a0=1, a1=2, a2=3, a3=4, a4=5, a5=6, webcam=7, t=t % 100.0, seme=float(rng.random()),
+            scena=0, alone1=1, alone2=2, webcam=3, t=t % 100.0, seme=float(rng.random()),
             glitch=((0.02 + 0.25 * self.energia + 0.2 * self.rabbia) * rng.random()
                     if self.glitch else 0.0),
             energia=self.energia, lampo=self.lampo, colpo=self.colpo,
@@ -961,114 +914,12 @@ class Ologramma:
         bersaglio.use()
         self.ctx.viewport = viewport
         self._scena_finale.use(0)
-        for i in range(6):                 # lo shader ne legge sei: se sono meno, ripeto l'ultimo
-            self._aloni[min(i, len(self._aloni) - 1)].use(1 + i)
+        self._alone1.use(1)
+        self._alone2.use(2)
         if self.t_webcam is not None:
-            self.t_webcam.use(7)
+            self.t_webcam.use(3)
         imposta(self.p_finale, **self._uniformi_finali)
         self.q_finale.render(moderngl.TRIANGLES)
-
-
-class Pannello:
-    """Pannello a schermo con i cursori. Si disegna con OpenCV e si mostra come texture."""
-
-    LARG, RIGA, MARG, TESTA = 330, 42, 16, 46
-
-    def __init__(self, ctx, olo):
-        self.ctx, self.olo = ctx, olo
-        self.visibile = False
-        self.alt = self.TESTA + len(CURSORI) * self.RIGA + 34
-        self.tex = ctx.texture((self.LARG, self.alt), 4, dtype="f1")
-        self.tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
-        self.prog = ctx.program(vertex_shader=VS_PANNELLO, fragment_shader=FS_PANNELLO)
-        self.buf = ctx.buffer(reserve=6 * 4 * 4, dynamic=True)
-        self.vao = ctx.vertex_array(self.prog, [(self.buf, "2f 2f", "in_pos", "in_uv")])
-        self._disegnati = None
-
-    def immagine(self):
-        """Il pannello come immagine RGBA."""
-        img = np.zeros((self.alt, self.LARG, 4), np.uint8)
-        img[:] = (12, 16, 20, 215)
-        chiaro, tenue = (235, 240, 245, 255), (130, 140, 150, 255)
-        accento = tuple(int(v * 255) for v in
-                        colorsys.hsv_to_rgb(self.olo.tinta, self.olo.saturazione, 1.0)) + (255,)
-        scrivi = lambda testo, x, y, colore, scala=0.5: cv2.putText(
-            img, testo, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scala, colore, 1, cv2.LINE_AA)
-        scrivi("IMPOSTAZIONI", self.MARG, 28, chiaro, 0.55)
-        x0, x1 = self.MARG, self.LARG - self.MARG
-        for i, (etichetta, attributo, minimo, massimo) in enumerate(CURSORI):
-            y = self.TESTA + i * self.RIGA
-            valore = float(getattr(self.olo, attributo))
-            scrivi(etichetta, x0, y + 14, chiaro)
-            scrivi(f"{valore:.2f}", x1 - 44, y + 14, tenue)
-            xv = int(x0 + (x1 - x0) * np.clip((valore - minimo) / (massimo - minimo), 0, 1))
-            cv2.line(img, (x0, y + 27), (x1, y + 27), (60, 68, 76, 255), 3, cv2.LINE_AA)
-            cv2.line(img, (x0, y + 27), (xv, y + 27), accento, 3, cv2.LINE_AA)
-            cv2.circle(img, (xv, y + 27), 7, chiaro, -1, cv2.LINE_AA)
-        scrivi("TAB chiude - 1-4 preset - P colore", x0, self.alt - 14, tenue, 0.42)
-        return img
-
-    def mouse(self, x, y, premuto, scala):
-        """x, y in pixel della finestra (origine in alto a sinistra). Vero se il clic e' suo."""
-        x, y = x / scala - 12, y / scala - 12                     # coordinate dentro il pannello
-        if not (self.visibile and premuto and 0 <= x < self.LARG and 0 <= y < self.alt):
-            return False
-        i = int((y - self.TESTA) // self.RIGA)
-        if 0 <= i < len(CURSORI):
-            _, attributo, minimo, massimo = CURSORI[i]
-            frazione = np.clip((x - self.MARG) / (self.LARG - 2 * self.MARG), 0.0, 1.0)
-            setattr(self.olo, attributo, float(minimo + frazione * (massimo - minimo)))
-        return True
-
-    def disegna(self, fb_w, fb_h, scala):
-        if not self.visibile:
-            return
-        valori = tuple(round(float(getattr(self.olo, c[1])), 3) for c in CURSORI)
-        if valori != self._disegnati:                             # ridisegno solo se cambia qualcosa
-            self._disegnati = valori
-            self.tex.write(self.immagine().tobytes())
-        # rettangolo in alto a sinistra, 12 pixel dal bordo
-        x0, y0 = 12 * scala, 12 * scala
-        x1, y1 = x0 + self.LARG * scala, y0 + self.alt * scala
-        n = lambda x, y: (x / fb_w * 2 - 1, 1 - y / fb_h * 2)
-        quad = [*n(x0, y0), 0, 0, *n(x1, y0), 1, 0, *n(x0, y1), 0, 1,
-                *n(x0, y1), 0, 1, *n(x1, y0), 1, 0, *n(x1, y1), 1, 1]
-        self.buf.write(np.array(quad, "f4").tobytes())
-        self.ctx.viewport = (0, 0, fb_w, fb_h)
-        self.ctx.enable(moderngl.BLEND)
-        self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
-        self.tex.use(0)
-        imposta(self.prog, tex=0)
-        self.vao.render(moderngl.TRIANGLES)
-        self.ctx.disable(moderngl.BLEND)
-
-
-def carica_impostazioni(olo, percorso=FILE_IMPOSTAZIONI):
-    """Rilegge le impostazioni salvate, ignorando valori mancanti o non validi."""
-    try:
-        with open(percorso, encoding="utf-8") as f:
-            dati = json.load(f)
-    except (OSError, ValueError):
-        return
-    limiti = {c[1]: c[2:] for c in CURSORI}
-    for nome in DA_SALVARE:
-        if nome not in dati:
-            continue
-        valore = dati[nome]
-        if nome in limiti and isinstance(valore, (int, float)):
-            setattr(olo, nome, float(np.clip(valore, *limiti[nome])))
-        elif nome == "stile" and valore in STILI or nome == "motivo" and valore in MOTIVI:
-            setattr(olo, nome, valore)
-        elif isinstance(valore, bool) and isinstance(getattr(olo, nome), bool):
-            setattr(olo, nome, valore)
-
-
-def salva_impostazioni(olo, percorso=FILE_IMPOSTAZIONI):
-    try:
-        with open(percorso, "w", encoding="utf-8") as f:
-            json.dump({nome: getattr(olo, nome) for nome in DA_SALVARE}, f, indent=2)
-    except OSError as errore:
-        print("Impostazioni non salvate:", errore)
 
 
 # ================================================================ ingressi
@@ -1217,8 +1068,6 @@ def main():
     ctx.enable(moderngl.PROGRAM_POINT_SIZE)
     print(f"GPU: {ctx.info['GL_RENDERER']} - rendering a {larghezza}x{altezza}")
     olo = Ologramma(ctx, larghezza, altezza)
-    carica_impostazioni(olo)
-    pannello = Pannello(ctx, olo)
     microfono = Microfono()
 
     virtuale = None
@@ -1245,8 +1094,6 @@ def main():
             return
         if codice in (glfw.KEY_Q, glfw.KEY_ESCAPE):
             glfw.set_window_should_close(finestra, True)
-        elif codice == glfw.KEY_TAB:
-            pannello.visibile = not pannello.visibile
         elif glfw.KEY_1 <= codice <= glfw.KEY_4:
             print("Preset:", olo.preset(codice - glfw.KEY_0))
         elif codice in alterna:
@@ -1335,14 +1182,6 @@ def main():
         ctx.viewport = (0, 0, fb_w, fb_h)
         ctx.screen.clear(0, 0, 0, 1)
         olo.componi(ctx.screen, ((fb_w - vw) // 2, (fb_h - vh) // 2, vw, vh))
-
-        # pannello: sopra a tutto, solo sulla finestra (non finisce in video e screenshot)
-        dpi = fb_w / max(1, glfw.get_window_size(finestra)[0])    # schermi ad alta densita'
-        scala_ui = dpi * max(1.0, fb_h / dpi / 1080)              # piu' grande sui monitor grandi
-        mx, my = glfw.get_cursor_pos(finestra)
-        premuto = glfw.get_mouse_button(finestra, glfw.MOUSE_BUTTON_LEFT) == glfw.PRESS
-        pannello.mouse(mx * dpi, my * dpi, premuto, scala_ui)
-        pannello.disegna(fb_w, fb_h, scala_ui)
         glfw.swap_buffers(finestra)
 
         # uscite facoltative: screenshot, video (30 fotogrammi al secondo), webcam virtuale
@@ -1360,7 +1199,6 @@ def main():
             if virtuale:
                 virtuale.send(immagine[:, :, ::-1])
 
-    salva_impostazioni(olo)
     tracciatore.attivo = False
     tracciatore.join(timeout=1.0)
     if stato["video"] is not None:
