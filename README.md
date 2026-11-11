@@ -57,6 +57,15 @@ python v14_fast_geometry.py              # normal window
 python v14_fast_geometry.py --virtuale   # also send the output to a virtual webcam
 ```
 
+To apply the mask to a video file instead of the webcam (needs [ffmpeg](https://ffmpeg.org)):
+
+```bash
+python v16_video_mode.py --video clip.mp4              # saves captures/clip_larva.mp4
+python v16_video_mode.py --video clip.mp4 --nero       # black background instead of the video
+```
+
+It uses your saved settings, keeps the original audio, and the audio drives the voice reaction.
+
 The virtual webcam needs OBS installed on Windows and macOS, or the `v4l2loopback` module on Linux.
 
 ### Controls (latest version)
@@ -104,6 +113,7 @@ Each file is a standalone snapshot of the project at one stage. The two current 
 | `versions/v13_optimized.py` | Faster tracking: MediaPipe runs on a 640 px copy, the camera is read on its own thread (MJPG), the body is tracked every other frame. Faster mesh math, and the virtual webcam is capped at 30 fps. Asks the webcam for 60 fps. |
 | `v14_fast_geometry.py` | Rewritten mesh geometry code, about 25% less CPU per frame with an identical image. **Recommended.** |
 | `v15_lite.py` | v14 for weaker PCs (integrated graphics, older laptops): no 2× supersampling and 4 bloom levels instead of 6. Slightly harder edges and a narrower glow. |
+| `v16_video_mode.py` | v14 plus a video-file mode: applies the mask to an existing video and saves an MP4 with the original audio (needs ffmpeg). |
 
 ## How it works
 
@@ -117,6 +127,7 @@ Each file is a standalone snapshot of the project at one stage. The two current 
 README.md, requirements.txt
 v14_fast_geometry.py   recommended version
 v15_lite.py            lighter version for weaker PCs
+v16_video_mode.py      v14 + apply the mask to a video file
 versions/              earlier versions (v01–v13)
 docs/                  images for this README
 models/                MediaPipe models, downloaded on first run (not in git)
