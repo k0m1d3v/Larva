@@ -4,6 +4,11 @@ A Python webcam filter that tracks your face with [MediaPipe](https://ai.google.
 
 > The code, comments and on-screen messages are in Italian.
 
+<p align="center">
+  <img src="docs/preview-red.png" alt="Red contour-line hologram mask on a black background" width="49%">
+  <img src="docs/preview-webcam.png" alt="Iridescent hologram mask over a dimmed webcam feed" width="49%">
+</p>
+
 ## Features
 
 - **Face tracking**: 478-point face mesh from MediaPipe Face Landmarker, plus Pose Landmarker for the body in later versions
