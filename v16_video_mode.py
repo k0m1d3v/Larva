@@ -855,7 +855,8 @@ class Ologramma:
         k = min(1.0, dt * 9.0)
         self.energia += k * (e.get("jawOpen", 0.0) - self.energia)
         self.sopracciglia += k * (e.get("browInnerUp", 0.0) - self.sopracciglia)
-        rabbia = float(np.clip((media("browDownLeft", "browDownRight") - 0.25) / 0.45, 0, 1))
+        # sopracciglia aggrottate: a riposo ~0.05, un cipiglio deciso ~0.40
+        rabbia = float(np.clip((media("browDownLeft", "browDownRight") - 0.15) / 0.25, 0, 1))
         self.rabbia += min(1.0, dt * 5.0) * (rabbia - self.rabbia)
         chiusi = [e.get("eyeBlinkRight", 0.0), e.get("eyeBlinkLeft", 0.0)]
         for i in range(2):
@@ -1194,9 +1195,13 @@ class Ologramma:
     # ------------------------------------------------------------ disegno
     def disegna(self, t, dt):
         ctx, (w, h) = self.ctx, self.dim
-        colore = np.array(colorsys.hsv_to_rgb(self.tinta, self.saturazione, 1.0))
-        colore += self.rabbia * 0.9 * (np.array([1.0, 0.10, 0.06]) - colore)   # rabbia: rosso
-        colore = tuple(float(v) for v in colore)
+        # rabbia: la tinta ruota verso il rosso restando satura. Mescolare in RGB (ciano + rosso)
+        # passava dal grigio-bianco e la rabbia non si vedeva
+        k = self.rabbia * self.rabbia * (3.0 - 2.0 * self.rabbia)        # morbido agli estremi
+        verso_rosso = (0.995 - self.tinta + 0.5) % 1.0 - 0.5              # giro piu' corto
+        tinta = (self.tinta + verso_rosso * k) % 1.0
+        saturazione = self.saturazione + (0.95 - self.saturazione) * k
+        colore = tuple(float(v) for v in colorsys.hsv_to_rgb(tinta, saturazione, 1.0))
         tempo = t % 1000.0
 
         # ---- 1) scena
