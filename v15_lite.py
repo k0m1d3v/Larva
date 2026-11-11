@@ -65,17 +65,20 @@ GRANDEZZA = 0.64      # con 'z' attivo: altezza del volto rispetto alla finestra
 PROSPETTIVA = 0.9     # valore iniziale. 0 = proiezione piatta; piu' alto = piu' profondita'
 OSCILLAZIONE = 0.10   # ampiezza (radianti) del dondolio della camera virtuale
 SCIA = 0.80           # persistenza della scia (0 = nessuna, 0.95 = lunghissima)
-MODELLO = "face_landmarker.task"
+# cartelle accanto allo script: modelli scaricati e screenshot/video salvati
+CARTELLA = os.path.dirname(os.path.abspath(__file__))
+CARTELLA_MODELLI = os.path.join(CARTELLA, "models")
+CARTELLA_CATTURE = os.path.join(CARTELLA, "captures")
+MODELLO = os.path.join(CARTELLA_MODELLI, "face_landmarker.task")
 URL_MODELLO = (
     "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
     "face_landmarker/float16/1/face_landmarker.task"
 )
-FILE_IMPOSTAZIONI = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 "maschera_impostazioni.json")
+FILE_IMPOSTAZIONI = os.path.join(CARTELLA, "maschera_impostazioni.json")
 TRACCIA_LARG = 640        # larghezza dell'immagine data a MediaPipe (i punti escono normalizzati)
 CORPO_OGNI = 2            # il corpo viene tracciato ogni N fotogrammi (2 = piu' leggero, bordi in ritardo)
 SAGOMA_DIM = (384, 216)   # risoluzione della sagoma del corpo passata agli shader
-MODELLO_CORPO = "pose_landmarker_lite.task"
+MODELLO_CORPO = os.path.join(CARTELLA_MODELLI, "pose_landmarker_lite.task")
 URL_CORPO = (
     "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
     "pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
@@ -1422,7 +1425,8 @@ def sagoma_con_distanza(maschera):
 
 def scarica(nome, url):
     if not os.path.exists(nome):
-        print(f"Scarico {nome} (solo la prima volta)...")
+        os.makedirs(os.path.dirname(nome), exist_ok=True)
+        print(f"Scarico {os.path.basename(nome)} (solo la prima volta)...")
         urllib.request.urlretrieve(url, nome)
 
 
@@ -1712,7 +1716,8 @@ def main():
             stato["screenshot"] = True
         elif codice == glfw.KEY_R:
             if stato["video"] is None:
-                nome = time.strftime("maschera_%Y%m%d_%H%M%S.mp4")
+                os.makedirs(CARTELLA_CATTURE, exist_ok=True)
+                nome = os.path.join(CARTELLA_CATTURE, time.strftime("maschera_%Y%m%d_%H%M%S.mp4"))
                 stato["video"] = cv2.VideoWriter(nome, cv2.VideoWriter_fourcc(*"mp4v"), 30,
                                                  (larghezza, altezza))
                 print("Registrazione avviata:", nome)
@@ -1807,7 +1812,8 @@ def main():
             immagine = np.ascontiguousarray(olo.leggi_immagine())
             if stato["screenshot"]:
                 stato["screenshot"] = False
-                nome = time.strftime("maschera_%Y%m%d_%H%M%S.png")
+                os.makedirs(CARTELLA_CATTURE, exist_ok=True)
+                nome = os.path.join(CARTELLA_CATTURE, time.strftime("maschera_%Y%m%d_%H%M%S.png"))
                 cv2.imwrite(nome, immagine)
                 print("Screenshot salvato:", nome)
             if registra:

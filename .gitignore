@@ -20,20 +20,17 @@ Thumbs.db
 desktop.ini
 
 # MediaPipe models (downloaded automatically on first run)
+models/
 *.task
 *.tflite
 
 # Screenshots and recordings produced by the app
+captures/
 maschera_*.png
 maschera_*.mp4
 
 # Local user settings
 maschera_impostazioni.json
 
-# Excluded versions (duplicates and the samurai-armor experiment)
-AddT-shirt fix.py
-JumpInHistory.py
-JumpInHistory #.py
-
-# Private notes
-Idee=TrovareUnNomee.txt
+# Private: excluded versions and notes
+archive/
