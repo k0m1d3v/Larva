@@ -1,4 +1,4 @@
-# Maschera — real-time holographic face mask
+# Larva — real-time holographic face mask
 
 A Python webcam filter that tracks your face with [MediaPipe](https://ai.google.dev/edge/mediapipe) and draws a glowing, sci-fi "hologram" over it: topographic contour lines, particles, trails, bloom and glitch effects. Newer versions render on the GPU with OpenGL. They react to your expressions and voice, and can send the result to a virtual webcam for OBS, Zoom, Discord and similar apps.
 
@@ -15,7 +15,7 @@ A Python webcam filter that tracks your face with [MediaPipe](https://ai.google.
 - **GPU rendering** (v5+): a 3D face mesh with per-pixel contour lines. Particles, trails, bloom and glitch are all shaders (moderngl + glfw).
 - **Styles**: hologram, dots only, lines only
 - **Line patterns**: depth contours, rings around the eyes and mouth, or scanlines
-- **Add-ons**: irises, teeth, facial features, horns, ASCII demon wings
+- **Add-ons**: irises, teeth, facial features, horns, ASCII demon wings, or an angel theme with a halo and feathered wings
 - **Color presets**: cyan, alarm red, gold, black & white, plus hue/saturation controls and the system color picker
 - **Reactions**:
   - your voice sends a wave of light out from the mouth with each syllable
@@ -27,6 +27,8 @@ A Python webcam filter that tracks your face with [MediaPipe](https://ai.google.
 - **Slider panel** (TAB) for line count, glow, trail, perspective, size, color and more. Settings are saved to `maschera_impostazioni.json` on exit and reloaded on start. Delete the file to reset them.
 - **Capture**: PNG screenshots and MP4 recording
 - **Virtual webcam** output via `pyvirtualcam`
+- **Video files**: apply the mask to an existing clip, keeping its audio
+- **Unique masks**: `--seme N` turns any number into its own variant of the mask, always the same for that number
 
 ## Requirements
 
@@ -46,9 +48,9 @@ pip install -r requirements.txt
 
 `sounddevice` (voice reaction) and `pyvirtualcam` (virtual webcam) are optional. Each script also lists its own dependencies at the top.
 
-Prefer not to clone the whole repo? Each version can also be downloaded on its own as a zip from the [Releases](https://github.com/k0m1d3v/maschera/releases) page.
+Prefer not to clone the whole repo? Versions v1–v15 can also be downloaded on their own as a zip from the [Releases](https://github.com/k0m1d3v/Larva/releases) page.
 
-The MediaPipe models are downloaded automatically the first time you run a script. v14 and v15 keep them in `models/`.
+The MediaPipe models are downloaded automatically the first time you run a script. From v14 on they are kept in `models/`.
 
 ## Usage
 
@@ -62,6 +64,13 @@ To apply the mask to a video file instead of the webcam (needs [ffmpeg](https://
 ```bash
 python v16_video_mode.py --video clip.mp4              # saves captures/clip_larva.mp4
 python v16_video_mode.py --video clip.mp4 --nero       # black background instead of the video
+```
+
+For a unique numbered mask, live or on a video:
+
+```bash
+python v18_unique.py --seme 137
+python v18_unique.py --video clip.mp4 --seme 137
 ```
 
 It uses your saved settings, keeps the original audio, and the audio drives the voice reaction.
@@ -80,6 +89,7 @@ The virtual webcam needs OBS installed on Windows and macOS, or the `v4l2loopbac
 | `o` / `d` / `t` | Irises / teeth / features (eyebrows, eyes, lips) |
 | `k` | Horns |
 | `a` | ASCII demon wings |
+| `e` | Angel theme: halo instead of horns, feathered wings |
 | `g` | Glitch |
 | `b` | Black background ↔ dimmed webcam |
 | `p` | System color picker |
@@ -94,7 +104,7 @@ Screenshots and recordings are saved in `captures/` as `maschera_YYYYMMDD_HHMMSS
 
 ## Versions
 
-Each file is a standalone snapshot of the project at one stage. The two current versions are in the main folder; older ones are in `versions/`. Most recent last:
+Each file is a standalone snapshot of the project at one stage. The current versions (v14–v18) are in the main folder; older ones are in `versions/`. Most recent last:
 
 | File | What it adds |
 |---|---|
@@ -114,6 +124,8 @@ Each file is a standalone snapshot of the project at one stage. The two current 
 | `v14_fast_geometry.py` | Rewritten mesh geometry code, about 25% less CPU per frame with an identical image. **Recommended.** |
 | `v15_lite.py` | v14 for weaker PCs (integrated graphics, older laptops): no 2× supersampling and 4 bloom levels instead of 6. Slightly harder edges and a narrower glow. |
 | `v16_video_mode.py` | v14 plus a video-file mode: applies the mask to an existing video and saves an MP4 with the original audio (needs ffmpeg). |
+| `v17_angel.py` | v16 plus an angel theme (key `e`): a 3D halo in place of the horns and feathered ASCII wings. In video mode: `--angelo`, `--preset N`. |
+| `v18_unique.py` | v17 plus unique numbered masks: `--seme N` (live or video) generates a variant that is always the same for that number and different from every other one: palette, line pattern and density, a fingerprint that bends the lines, horn shape, wing characters. About one seed in ten also gets iridescent lines. **Latest.** |
 
 ## How it works
 
@@ -124,12 +136,18 @@ Each file is a standalone snapshot of the project at one stage. The two current 
 ## Project layout
 
 ```
-README.md, requirements.txt
+README.md, LICENSE, requirements.txt
 v14_fast_geometry.py   recommended version
 v15_lite.py            lighter version for weaker PCs
 v16_video_mode.py      v14 + apply the mask to a video file
+v17_angel.py           v16 + angel theme (halo, feathered wings)
+v18_unique.py          v17 + unique numbered masks (--seme N)
 versions/              earlier versions (v01–v13)
 docs/                  images for this README
 models/                MediaPipe models, downloaded on first run (not in git)
 captures/              your screenshots and recordings (not in git)
 ```
+
+## License
+
+[MIT](LICENSE): use, modify and share it freely.
